@@ -1,0 +1,36 @@
+# Seed data for the PADL lab directory. Deliberately small but shaped like a
+# real tree: two containers, a couple of people, one group, and one entry with a
+# multi-valued attribute so the object pane has something to wrap.
+
+dn: ou=People,dc=example,dc=com
+objectClass: organizationalUnit
+ou: People
+
+dn: ou=Groups,dc=example,dc=com
+objectClass: organizationalUnit
+ou: Groups
+
+dn: uid=jdoe,ou=People,dc=example,dc=com
+objectClass: inetOrgPerson
+uid: jdoe
+cn: John Doe
+sn: Doe
+givenName: John
+mail: jdoe@example.com
+mail: john.doe@example.com
+title: Systems Engineer
+userPassword: jdoe-password
+
+dn: uid=asmith,ou=People,dc=example,dc=com
+objectClass: inetOrgPerson
+uid: asmith
+cn: Alice Smith
+sn: Smith
+givenName: Alice
+mail: asmith@example.com
+
+dn: cn=engineers,ou=Groups,dc=example,dc=com
+objectClass: groupOfNames
+cn: engineers
+member: uid=jdoe,ou=People,dc=example,dc=com
+member: uid=asmith,ou=People,dc=example,dc=com

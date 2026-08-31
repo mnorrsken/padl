@@ -1,0 +1,58 @@
+# A throwaway OpenLDAP for PADL's integration tests and for poking at the UI by
+# hand. It listens on non-standard host ports so it cannot collide with a real
+# directory client on the machine.
+#
+#   docker compose -f dev/docker-compose.yml up -d
+#   PADL_IT=1 go test ./...
+#
+# The server's certificate is self-signed and issued for the container's own
+# hostname, so connecting to 127.0.0.1 fails normal verification — which is
+# exactly the trust-on-first-use path the tests need to exercise.
+services:
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: padl-lab-openldap
+    command: ["--copy-service", "--loglevel", "info"]
+    environment:
+      LDAP_ORGANISATION: "PADL Lab"
+      LDAP_DOMAIN: "example.com"
+      LDAP_ADMIN_PASSWORD: "padl-lab"
+      LDAP_CONFIG_PASSWORD: "padl-lab"
+      # Without this the server demands a client certificate and every bind
+      # fails before it gets anywhere near the trust decision under test.
+      LDAP_TLS_VERIFY_CLIENT: "never"
+    volumes:
+      - ./seed.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-padl.ldif:ro
+    ports:
+      - "13389:389"
+      - "13636:636"
+    healthcheck:
+      # Bound, not anonymous: the lab keeps OpenLDAP's default ACLs, which hide
+      # the data from an unauthenticated client.
+      test: ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost",
+             "-D", "cn=admin,dc=example,dc=com", "-w", "padl-lab",
+             "-b", "dc=example,dc=com", "-s", "base", "dn"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # lldap is a small, opinionated directory that a lot of homelabs run. It is
+  # here because it rejects anything but its own bind DN shape
+  # (uid=<id>,ou=people,<base>) with a naming violation, which is exactly the
+  # kind of failure PADL has to report legibly rather than swallow.
+  lldap:
+    image: lldap/lldap:stable
+    container_name: padl-lab-lldap
+    environment:
+      LLDAP_JWT_SECRET: "padl-lab-jwt-secret-not-for-real-use"
+      LLDAP_KEY_SEED: "padl-lab-key-seed"
+      LLDAP_LDAP_BASE_DN: "dc=example,dc=com"
+      LLDAP_LDAP_USER_PASS: "padl-lab"
+    ports:
+      - "13390:3890"
+      - "17170:17170"
+    healthcheck:
+      test: ["CMD", "/app/lldap", "healthcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 20

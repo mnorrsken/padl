@@ -1,0 +1,6 @@
+/bin/
+/dist/
+*.test
+*.out
+.DS_Store
+dev/certs/

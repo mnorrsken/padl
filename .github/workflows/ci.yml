@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - run: go vet ./...
+
+      - name: Unit tests
+        run: go test -race ./...
+
+      - name: Start the lab directories
+        run: |
+          docker compose -f dev/docker-compose.yml up -d
+          for c in padl-lab-openldap padl-lab-lldap; do
+            ok=""
+            for i in $(seq 1 60); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$c" 2>/dev/null || true)
+              if [ "$status" = "healthy" ]; then ok=1; break; fi
+              sleep 2
+            done
+            if [ -z "$ok" ]; then
+              echo "$c never became healthy"
+              docker logs "$c"
+              exit 1
+            fi
+          done
+
+      - name: Integration tests
+        env:
+          PADL_IT: '1'
+        run: go test -count=1 ./...
+
+      - name: Lab logs on failure
+        if: failure()
+        run: |
+          docker logs padl-lab-openldap || true
+          docker logs padl-lab-lldap || true
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cross-compile
+        run: make dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: padl-binaries
+          path: dist/
