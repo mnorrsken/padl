@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
+
+# Tags are covered by release.yml, which runs the same checks before it
+# publishes anything — running CI on them as well is duplicate work.
 
 jobs:
   test:
