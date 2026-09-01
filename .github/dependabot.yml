@@ -1,0 +1,67 @@
+# Dependabot version updates.
+#
+# GitHub runs these on the schedule below; there is no workflow to trigger and
+# nothing to run in CI. Each update opens a pull request, which the normal CI
+# workflow then tests — including the integration tests against the lab
+# directories, so a dependency that breaks LDAP behaviour is caught before the
+# PR is mergeable rather than after a release.
+#
+# Not covered by any of this, and worth remembering when it matters:
+#   - the WiX version pinned in .github/workflows (a `dotnet tool install`
+#     line is not a manifest Dependabot can read)
+#   - lldap/lldap:stable in dev/docker-compose.yml, because a floating tag has
+#     no version to bump
+
+version: 2
+
+updates:
+  # The Go module. Grouped so the usual drip of minor and patch bumps arrives as
+  # one reviewable pull request; a major version gets its own, because it
+  # deserves reading rather than merging.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    groups:
+      go-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The actions used by CI and the release workflow. These pin major versions
+  # (actions/checkout@v7), so this mostly catches a new major worth adopting.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The throwaway directory servers the integration tests run against. Monthly:
+  # this is lab infrastructure that changes rarely, and a bump here is only
+  # interesting because CI will immediately say whether PADL still works
+  # against the new image.
+  - package-ecosystem: "docker-compose"
+    directory: "/dev"
+    schedule:
+      interval: "monthly"
+      time: "06:00"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 3
