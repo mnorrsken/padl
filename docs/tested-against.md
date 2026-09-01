@@ -27,6 +27,15 @@ code. A bind DN that is not a DN at all is now caught before dialling.
 was a segfault on the first search — and would have hit any server that returns
 controls or referrals on the done message, paged results included.
 
+**Substring filters work on only some attributes, and a failure is contagious.**
+`(cn=adm*)` matches, `(uid=adm*)` matches, but `(sn=adm*)` matches nothing — and
+`(|(cn=adm*)(sn=adm*))` matches nothing either, so one unsupported attribute
+takes the whole OR with it. Equality is fine: `(|(cn=adm*)(sn=Administrator))`
+matches. `(objectClass=adm*)` is refused outright with result 53, *"Unsupported
+user attribute for substring filter"*. This is why quick-search attribute lists
+are per-vendor: lldap gets `uid cn mail displayName`, and the integration tests
+pin the quirk so a fix in lldap gets noticed.
+
 **One-level search at the root returns the whole subtree.** Asking for the
 children of `dc=example,dc=com` yields the users and groups directly, while
 `ou=people` and `ou=groups` — which do exist and read correctly — never appear.
@@ -55,6 +64,8 @@ simulated terminal — against the throwaway OpenLDAP:
   entry exactly once and finishing with an empty cookie
 - search by filter, including a malformed filter being reported rather than
   silently matching nothing
+- quick search: one word reaching an entry by uid, surname, given name or mail;
+  two words narrowing rather than widening; a miss returning nothing
 - an LDIF export of a real subtree: version header, one record per entry, values
   intact, no line over 76 columns
 

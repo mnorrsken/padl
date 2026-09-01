@@ -563,7 +563,7 @@ func (a *App) refreshHints() {
 	case a.modalOpen():
 		a.status.setKeys("esc close dialog")
 	case a.searching:
-		a.status.setKeys("[search] ctrl-s scope · ↑↓ history · enter run · esc cancel")
+		a.status.setKeys("[search] words search several attributes · ( starts a raw filter · ctrl-s scope · ↑↓ history · enter run · esc cancel")
 	case a.GetFocus() == a.results:
 		a.status.setKeys("[results] enter go to it in the tree · y copy dn · esc back · " + common)
 	case a.GetFocus() == a.tree:
@@ -1130,10 +1130,10 @@ func (a *App) openSearch() {
 		return
 	}
 	a.searching = true
-	a.search.open(base)
+	a.search.open(base, a.vendor)
 	a.main.ResizeItem(a.search, 2, 0)
 	a.SetFocus(a.search.input)
-	a.status.setKeys("[search] ctrl-s scope · ↑↓ history · enter run · esc cancel")
+	a.status.setKeys("[search] words search several attributes · ( starts a raw filter · ctrl-s scope · ↑↓ history · enter run · esc cancel")
 }
 
 // searchBase is the DN a new search starts from: the selected entry, or the
@@ -1182,7 +1182,7 @@ func (a *App) fetchResults(q ldapx.Query, req ldapx.PageRequest, appendPage bool
 	if a.dir == nil {
 		return
 	}
-	a.task(groupNone, fmt.Sprintf("searching %s…", q.Filter), func(ctx context.Context) (func(), error) {
+	a.task(groupNone, fmt.Sprintf("searching %s…", q.Title()), func(ctx context.Context) (func(), error) {
 		page, err := a.dir.Search(ctx, q, req)
 		if err != nil {
 			// A rejected filter is the common case and the user has to see it
@@ -1200,7 +1200,7 @@ func (a *App) fetchResults(q ldapx.Query, req ldapx.PageRequest, appendPage bool
 			a.refreshHints()
 			switch {
 			case len(a.results.entries) == 0:
-				a.status.warn("%s matched nothing under %s", q.Filter, q.BaseDN)
+				a.status.warn("%s matched nothing under %s", q.Title(), q.BaseDN)
 			case page.Truncated:
 				a.status.warn("%d matches shown; this server has no paged results, so raise the profile's child limit to see more",
 					len(a.results.entries))

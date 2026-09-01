@@ -232,6 +232,11 @@ const helpText = `[::b]Panes[-::-]
 
 [::b]Search[-::-]
   /                 open the filter bar, based at the selected entry
+  words             a quick search: every word must match, each against
+                    any of the attributes the bar lists. "mar nor" finds
+                    entries where something starts with mar and something
+                    starts with nor. The attributes depend on the server.
+  (filter)          anything starting with ( is sent as a raw LDAP filter
   Ctrl-S            cycle the scope: sub, base, one
   Up / Down         walk this session's filter history
   Enter             run it — results replace the tree on the left

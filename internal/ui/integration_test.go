@@ -385,3 +385,44 @@ func TestIntegrationExportSubtree(t *testing.T) {
 		}
 	}
 }
+
+// Quick search end to end against a real server: bare words in, the right
+// person out.
+func TestIntegrationQuickSearchThroughTheUI(t *testing.T) {
+	requireIT(t)
+	p := labProfile(t, config.SecurityNone, envOr("PADL_IT_LDAP_PORT", "13389"))
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitFor("ou=People", "OpenLDAP")
+
+	h.rune('/')
+	h.waitFor("cn sn givenName displayName uid mail ou o description")
+	h.typeString("john doe")
+	h.waitFor("all 2 words, each in any of")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("1 for john doe", "uid=jdoe,ou=People,dc=example,dc=com")
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com", "John Doe")
+}
+
+// On lldap the bar has to offer lldap's own attribute list, not the generic
+// one, or the search finds nothing.
+func TestIntegrationQuickSearchUsesTheVendorsAttributes(t *testing.T) {
+	requireIT(t)
+	p := lldapProfile(t)
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitFor("ou=people", "lldap")
+
+	h.rune('/')
+	h.waitFor("uid cn mail displayName")
+	if strings.Contains(h.text(), "givenName") {
+		t.Errorf("lldap cannot substring-match givenName; it must not be offered:\n%s", h.text())
+	}
+
+	h.typeString("admin")
+	h.key(tcell.KeyEnter)
+	h.waitFor("for admin", "uid=admin,ou=people,dc=example,dc=com")
+}

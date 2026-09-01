@@ -527,3 +527,117 @@ func TestIntegrationLLDAPHasNoPagingSoResultsTruncate(t *testing.T) {
 		t.Error("a server without paging must not hand back a cookie; there is nothing to continue")
 	}
 }
+
+// -------------------------------------------------------------- quick search
+
+// A quick search on a standards-compliant server finds people by any of the
+// attributes in the generic list.
+func TestIntegrationQuickSearch(t *testing.T) {
+	requireIT(t)
+	c, err := ldapx.Connect(ctx(t), itProfile(t, config.SecurityNone), nil, itAdminPwd)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer c.Close()
+
+	find := func(words string) []string {
+		t.Helper()
+		filter := ldapx.QuickFilter(words, c.Vendor())
+		if filter == "" {
+			t.Fatalf("%q produced no filter", words)
+		}
+		page, err := c.Search(ctx(t), ldapx.Query{
+			BaseDN: itBaseDN, Scope: ldapx.ScopeSubtree, Filter: filter,
+		}, ldapx.PageRequest{Size: 50})
+		if err != nil {
+			t.Fatalf("%q (%s): %v", words, filter, err)
+		}
+		var dns []string
+		for _, e := range page.Entries {
+			dns = append(dns, strings.ToLower(e.DN))
+		}
+		return dns
+	}
+
+	jdoe := "uid=jdoe,ou=people,dc=example,dc=com"
+
+	// By uid, by surname, by given name, by mail — all reach the same person.
+	for _, words := range []string{"jdoe", "doe", "john", "jdoe@example"} {
+		got := find(words)
+		if !containsDN(got, jdoe) {
+			t.Errorf("quick search %q found %v, want it to include %s", words, got, jdoe)
+		}
+	}
+
+	// Two words must narrow, not widen: both have to match the same entry.
+	if got := find("john doe"); len(got) != 1 || !containsDN(got, jdoe) {
+		t.Errorf(`quick search "john doe" = %v, want only %s`, got, jdoe)
+	}
+	// Two words that do not share an entry find nothing.
+	if got := find("john smith"); len(got) != 0 {
+		t.Errorf(`quick search "john smith" = %v, want nothing`, got)
+	}
+	// A term matching nobody finds nobody, rather than erroring.
+	if got := find("zzzznothing"); len(got) != 0 {
+		t.Errorf("quick search for a miss = %v, want nothing", got)
+	}
+}
+
+// The reason the attribute lists are per-vendor: lldap cannot substring-match
+// sn or givenName, and rather than erroring it returns nothing and takes the
+// whole OR down with it. The generic list would therefore find nobody here,
+// while lldap's own list finds them.
+func TestIntegrationQuickSearchLLDAPNeedsItsOwnAttributes(t *testing.T) {
+	requireIT(t)
+	c, err := ldapx.Connect(ctx(t), itLLDAPProfile(t), nil, itAdminPwd)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer c.Close()
+
+	if c.Vendor() != ldapx.VendorLLDAP {
+		t.Fatalf("vendor = %v, want lldap", c.Vendor())
+	}
+
+	search := func(filter string) int {
+		t.Helper()
+		page, err := c.Search(ctx(t), ldapx.Query{
+			BaseDN: itBaseDN, Scope: ldapx.ScopeSubtree, Filter: filter,
+		}, ldapx.PageRequest{Size: 50})
+		if err != nil {
+			t.Fatalf("%s: %v", filter, err)
+		}
+		return len(page.Entries)
+	}
+
+	// What PADL actually sends for lldap.
+	if n := search(ldapx.QuickFilter("admin", c.Vendor())); n < 1 {
+		t.Errorf("lldap quick search for admin found %d entries, want at least one", n)
+	}
+
+	// The generic list, which is what a one-size filter would send. If this
+	// ever starts matching, lldap has been fixed and the special case can go.
+	generic := ldapx.QuickFilterFor([]string{"admin"}, ldapx.QuickSearchAttributes(ldapx.VendorGeneric))
+	if n := search(generic); n > 0 {
+		t.Logf("lldap now matches the generic filter (%d entries) — recheck whether "+
+			"lldapQuickAttributes still needs to be special-cased", n)
+	}
+
+	// The precise quirk, pinned so a change in lldap is noticed.
+	if n := search("(cn=admin*)"); n != 1 {
+		t.Errorf("(cn=admin*) alone = %d entries, want 1", n)
+	}
+	if n := search("(|(cn=admin*)(sn=admin*))"); n != 0 {
+		t.Logf("lldap no longer poisons an OR containing a substring match on sn "+
+			"(%d entries); the narrow attribute list may be relaxable", n)
+	}
+}
+
+func containsDN(list []string, want string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, want) {
+			return true
+		}
+	}
+	return false
+}

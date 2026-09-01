@@ -1,5 +1,7 @@
 package ldapx
 
+import "strings"
+
 // PageRequest asks for one page of results.
 type PageRequest struct {
 	// Size is how many entries to return. Zero means the profile's default.
@@ -63,4 +65,16 @@ type Query struct {
 	Filter string
 	// Attributes to fetch; nil means the tree-row minimum.
 	Attributes []string
+	// Label is what to call this search on screen. A quick search builds a
+	// filter far too long to use as a title, so it carries the words the user
+	// typed instead. Empty means use Filter.
+	Label string
+}
+
+// Title is the short name for this search.
+func (q Query) Title() string {
+	if strings.TrimSpace(q.Label) != "" {
+		return q.Label
+	}
+	return q.Filter
 }

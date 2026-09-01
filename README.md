@@ -33,8 +33,11 @@ PADL  Lab  ldaps://ldap.example.com:636  OpenLDAP
 - **Followable DNs**: press enter on a `member`, `memberOf`, `manager` — any value
   holding a DN — and the tree jumps to that entry, opening whatever is closed on
   the way.
-- **Search** with raw LDAP filters, based wherever you are standing, with a
-  scope toggle and this session's history.
+- **Search**: type bare words for a quick search — `mar nor` finds entries where
+  something starts with `mar` *and* something starts with `nor`, across the
+  attributes that server actually supports — or start with `(` to write the LDAP
+  filter yourself. Based wherever you are standing, with a scope toggle and this
+  session's history.
 - **Paged results** (RFC 2696): big containers and big result sets load a page at
   a time instead of stopping at a limit.
 - **Bookmarks**, **go to a DN**, **copy an entry as LDIF**, and **export a
@@ -149,7 +152,13 @@ profiles:
 ## Servers
 
 PADL targets standards-compliant LDAPv3 and handles a few vendor differences
-explicitly:
+explicitly. Quick search in particular uses a **per-server attribute list**
+rather than one broad set, because a broad set does not work: RFC 4511 says a
+filter naming an unknown attribute simply fails to match, and OpenLDAP behaves
+that way — but on lldap a substring match on `sn` or `givenName` returns nothing
+*and takes the whole OR down with it*, so a generous filter finds nobody on a
+server that has the entry. The bar always shows which attributes it will search.
+
 
 - **Active Directory** — the domain partition is shown first; the Configuration
   and Schema partitions hide behind `a`. `objectGUID`, `objectSid`,
@@ -161,7 +170,8 @@ explicitly:
 - **lldap** — accepts only `uid=<id>,ou=people,<base>` as a bind DN, and answers
   a one-level search at the root with the whole subtree. PADL rebuilds the real
   containers from that and passes the server's own error text through when a
-  bind DN is the wrong shape.
+  bind DN is the wrong shape. Quick search there covers `uid cn mail
+  displayName` only, for the reason above.
 
 `docs/tested-against.md` records what has actually been run against what.
 

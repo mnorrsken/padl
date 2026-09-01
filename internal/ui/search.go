@@ -20,6 +20,8 @@ type searchBar struct {
 
 	base  string
 	scope ldapx.Scope
+	// vendor decides which attributes a bare-word search looks in.
+	vendor ldapx.Vendor
 
 	// history is this session's filters, newest last. Up and Down walk it.
 	history []string
@@ -46,6 +48,10 @@ func newSearchBar() *searchBar {
 		SetLabelColor(colorAttrName).
 		SetFieldBackgroundColor(colorBackground).
 		SetFieldTextColor(colorText)
+
+	// The preview updates as you type, so the filter a quick search builds is
+	// visible before it runs rather than being magic.
+	s.input.SetChangedFunc(func(string) { s.render() })
 
 	s.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		switch ev.Key() {
@@ -82,9 +88,20 @@ func newSearchBar() *searchBar {
 			return
 		}
 		s.remember(filter)
-		if s.run != nil {
-			s.run(ldapx.Query{BaseDN: s.base, Scope: s.scope, Filter: filter})
+		if s.run == nil {
+			return
 		}
+		q := ldapx.Query{BaseDN: s.base, Scope: s.scope, Filter: filter}
+		if !ldapx.IsRawFilter(filter) {
+			built := ldapx.QuickFilter(filter, s.vendor)
+			if built == "" {
+				return
+			}
+			// Keep the words the user typed as the label; the built filter is
+			// far too long to use as a title.
+			q.Filter, q.Label = built, filter
+		}
+		s.run(q)
 	})
 
 	s.AddItem(s.info, 1, 0, false).AddItem(s.input, 1, 0, true)
@@ -92,8 +109,9 @@ func newSearchBar() *searchBar {
 }
 
 // open readies the bar for a new search under base.
-func (s *searchBar) open(base string) {
+func (s *searchBar) open(base string, vendor ldapx.Vendor) {
 	s.base = base
+	s.vendor = vendor
 	s.pos = len(s.history)
 	s.draft = ""
 	s.input.SetText("")
@@ -105,11 +123,39 @@ func (s *searchBar) render() {
 	if strings.TrimSpace(base) == "" {
 		base = "(nothing selected)"
 	}
-	s.info.SetText(fmt.Sprintf(
-		"[%s]scope[-] %s  [%s]under[-] %s   [%s]ctrl-s scope · ↑↓ history · enter search · esc cancel[-]",
+	s.info.SetText(fmt.Sprintf("[%s]scope[-] %s  [%s]under[-] %s   %s",
 		tag(colorAttrName), s.scope,
 		tag(colorAttrName), tview.Escape(base),
-		tag(colorDim)))
+		s.preview()))
+}
+
+// preview describes what pressing enter will actually run.
+//
+// It names the attributes rather than echoing the filter: a two-word quick
+// search builds something around 180 characters, which no terminal shows on one
+// line, and the attribute list is the part that varies by server and decides
+// whether a search will find anything. The words themselves are already visible
+// in the field just below.
+func (s *searchBar) preview() string {
+	text := strings.TrimSpace(s.input.GetText())
+	if ldapx.IsRawFilter(text) {
+		return fmt.Sprintf("[%s]raw filter, sent as typed[-]", tag(colorAccent))
+	}
+
+	attrs := tview.Escape(strings.Join(ldapx.QuickSearchAttributes(s.vendor), " "))
+	switch terms := len(strings.Fields(text)); {
+	case terms == 0:
+		// Which attributes a bare-word search covers is worth knowing before
+		// typing, not after — it is the thing that differs between servers.
+		return fmt.Sprintf("[%s]words match[-] %s", tag(colorDim), attrs)
+	case ldapx.QuickFilter(text, s.vendor) == "":
+		return fmt.Sprintf("[%s]nothing to search for[-]", tag(colorWarn))
+	case terms == 1:
+		return fmt.Sprintf("[%s]any of[-] %s", tag(colorAttrName), attrs)
+	default:
+		return fmt.Sprintf("[%s]all %d words, each in any of[-] %s",
+			tag(colorAttrName), terms, attrs)
+	}
 }
 
 // remember adds a filter to the session's history, moving a repeat to the end
@@ -253,7 +299,7 @@ func (r *resultsPane) show(q ldapx.Query, page *ldapx.Page, appendPage bool) {
 		r.AddItem(fmt.Sprintf("%s first %d only (no paging)", iconMore, len(r.entries)), "", 0, nil)
 	}
 
-	r.SetTitle(fmt.Sprintf(" %d for %s ", len(r.entries), tview.Escape(q.Filter)))
+	r.SetTitle(fmt.Sprintf(" %d for %s ", len(r.entries), tview.Escape(q.Title())))
 	if len(r.entries) == 0 {
 		r.AddItem("nothing matched", "", 0, nil)
 	}

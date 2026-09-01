@@ -206,8 +206,16 @@ func (d *fakeDir) Search(ctx context.Context, q ldapx.Query, req ldapx.PageReque
 				continue
 			}
 		}
-		if needle := searchNeedle(q.Filter); needle != "" &&
-			!strings.Contains(strings.ToLower(dn), strings.ToLower(needle)) {
+		// Every distinct term in the filter has to appear, mirroring the AND a
+		// quick search builds.
+		matched := true
+		for _, term := range quickTerms(q.Filter) {
+			if !strings.Contains(strings.ToLower(dn), strings.ToLower(term)) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		hits = append(hits, *e)
@@ -256,15 +264,50 @@ func pageOf(hits []ldapx.Entry, req ldapx.PageRequest, paging bool) (*ldapx.Page
 	return page, nil
 }
 
-// searchNeedle pulls the value out of a simple (attr=value) filter.
+// searchNeedle reduces a filter to the values it is looking for, so the fake
+// can match without implementing RFC 4515. A quick search produces one clause
+// per term, and every term has to match — which is enough to tell a working
+// quick search from a broken one.
 func searchNeedle(filter string) string {
-	f := strings.TrimSpace(filter)
-	f = strings.TrimPrefix(f, "(")
-	f = strings.TrimSuffix(f, ")")
-	if i := strings.Index(f, "="); i >= 0 {
-		return strings.Trim(f[i+1:], "*")
+	if vals := filterValues(filter); len(vals) > 0 {
+		return vals[0]
 	}
 	return ""
+}
+
+// filterValues pulls every "=value" out of a filter, stripped of wildcards.
+func filterValues(filter string) []string {
+	var out []string
+	for _, part := range strings.Split(filter, "(") {
+		i := strings.Index(part, "=")
+		if i < 0 {
+			continue
+		}
+		// The tail of a filter carries closing parens for every enclosing
+		// group, so trim any run of them along with the wildcards. A value
+		// containing a real paren arrives escaped as \29, so nothing is lost.
+		v := strings.Trim(part[i+1:], "*)")
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// quickTerms returns the distinct terms a quick-search filter is ANDing, which
+// is what a match has to satisfy all of.
+func quickTerms(filter string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range filterValues(filter) {
+		k := strings.ToLower(v)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func (d *fakeDir) Entry(ctx context.Context, dn string, operational bool) (*ldapx.Entry, error) {
@@ -1688,4 +1731,79 @@ func TestExportRefusesToOverwrite(t *testing.T) {
 	if string(data) != "do not lose me" {
 		t.Errorf("the existing file was overwritten: %q", data)
 	}
+}
+
+// -------------------------------------------------------------- quick search
+
+// Bare words become a filter; the preview shows exactly what will run, so it is
+// never guesswork.
+func TestQuickSearchPreviewsTheFilterItWillRun(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	// The attributes are named before anything is typed: which ones a bare-word
+	// search covers is what differs between servers.
+	h.waitFor("words match", "cn sn givenName displayName uid mail ou o description")
+
+	h.typeString("jdoe")
+	h.waitFor("any of", "cn sn givenName displayName uid mail ou o description")
+
+	// A second word says that both must match.
+	h.typeString(" doe")
+	h.waitFor("all 2 words, each in any of")
+
+	// A raw filter is not rewritten.
+	for i := 0; i < 10; i++ {
+		h.screen.InjectKey(tcell.KeyBackspace2, 0, tcell.ModNone)
+	}
+	h.typeString("(uid=x)")
+	h.waitFor("raw filter, sent as typed")
+}
+
+func TestQuickSearchFindsAnEntry(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("asmith")
+	h.key(tcell.KeyEnter)
+
+	// The results are titled with the words typed, not the enormous filter.
+	h.waitFor("1 for asmith", "uid=asmith,ou=People,dc=example,dc=com")
+	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com", "Alice Smith")
+}
+
+// Two words have to narrow the result, not widen it.
+func TestQuickSearchWithTwoTermsNarrows(t *testing.T) {
+	d := withManyUsers(sampleDir(), 10)
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("user")
+	h.key(tcell.KeyEnter)
+	h.waitFor("10 for user")
+	h.key(tcell.KeyEscape)
+
+	h.rune('/')
+	h.typeString("user 07")
+	h.key(tcell.KeyEnter)
+	h.waitFor("1 for user 07", "uid=user07")
+}
+
+// Anything starting with "(" is still a filter written by hand.
+func TestRawFilterStillWorksAlongsideQuickSearch(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("(uid=jdoe)")
+	h.waitFor("raw filter, sent as typed")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("1 for (uid=jdoe)", "uid=jdoe,ou=People,dc=example,dc=com")
 }

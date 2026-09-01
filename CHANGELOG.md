@@ -2,6 +2,25 @@
 
 All notable changes to PADL.
 
+## [0.5.0] - 2026-09-01
+
+### Added
+- **Quick search** — type bare words in the search bar instead of a filter.
+  `mar nor` becomes `(&(|(cn=mar*)(sn=mar*)…)(|(cn=nor*)(sn=nor*)…))`: every word
+  must match, each against any of the searched attributes, with prefix matching.
+  Anything starting with `(` is still sent as a raw LDAP filter, and a wildcard
+  you type yourself is kept as written.
+- **Per-server search attributes.** The attribute list is chosen from the
+  detected vendor rather than being one broad set, and the bar always names the
+  attributes it will search. A single generous list is not workable: RFC 4511
+  says a filter naming an unknown attribute simply fails to match, and OpenLDAP
+  behaves that way, but on lldap a substring match on `sn` or `givenName`
+  returns nothing *and takes the whole OR down with it* — so a generous filter
+  finds nobody on a server that has the entry. Active Directory gets
+  `sAMAccountName` and `userPrincipalName` and deliberately not `uid`, which
+  only exists there with the RFC 2307 schema extension; eDirectory gets
+  `fullName`; lldap gets the four attributes it can actually substring-match.
+
 ## [0.4.0] - 2026-09-01
 
 Milestone 2: search and navigation.
