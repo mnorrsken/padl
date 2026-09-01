@@ -571,6 +571,30 @@ func (h *harness) loadAllPages(rowMarker string) {
 	h.t.Fatalf("paging never finished:\n%s", h.text())
 }
 
+// isLink reports whether a value is rendered as a followable DN, which is shown
+// by underlining rather than by any text label.
+func (h *harness) isLink(value string) bool {
+	h.t.Helper()
+	style, ok := h.styleOf(value)
+	if !ok {
+		return false
+	}
+	_, _, attrs := style.Decompose()
+	return attrs&tcell.AttrUnderline != 0
+}
+
+// waitConnected waits until a connection is actually up.
+//
+// Waiting for a piece of tree text is not enough: the same text can still be on
+// screen from before a disconnect, so a test can race ahead and act while the
+// app is between connections. The header is unambiguous.
+func (h *harness) waitConnected() {
+	h.t.Helper()
+	h.waitUntil("the connection to be up", func() bool {
+		return !strings.Contains(h.text(), "not connected")
+	})
+}
+
 func (h *harness) key(k tcell.Key) {
 	h.screen.InjectKey(k, 0, tcell.ModNone)
 }
@@ -882,7 +906,7 @@ func TestValueInspectorOpensAndReturnsFocusToTheObjectPane(t *testing.T) {
 	h.key(tcell.KeyRight)
 	h.waitFor("uid=jdoe")
 	h.key(tcell.KeyDown)
-	h.waitFor("12345678-1234-5678-1234-56789abcdef0", "(enter to inspect)")
+	h.waitFor("12345678-1234-5678-1234-56789abcdef0")
 
 	// Into the object pane, then walk down until Enter opens the objectGUID
 	// row. Enter inspects any value, so a wrong row opens the wrong popup and
@@ -962,7 +986,9 @@ func TestHelpOverlay(t *testing.T) {
 	h.waitFor("dc=example,dc=com")
 
 	h.rune('?')
-	h.waitFor("Keys (esc to close)", "operational attributes")
+	// Something from the last section too, to prove the whole thing fits rather
+	// than just the first screenful.
+	h.waitFor("Keys (esc to close)", "quick search", "PADL_PASSWORD_<ID>")
 
 	h.key(tcell.KeyEscape)
 	h.waitUntil("the help overlay to close", func() bool {
@@ -1223,23 +1249,26 @@ func TestFollowDNJumpsToTheEntryInTheTree(t *testing.T) {
 	h.key(tcell.KeyRight)
 	h.waitFor("cn=engineers")
 	h.key(tcell.KeyDown)
-	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com", "(enter to follow)")
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
 
 	// A member is a link; the free-text description is not.
 	screen := h.text()
-	if !strings.Contains(screen, "uid=jdoe,ou=People,dc=example,dc=com  (enter to follow)") {
+	// Links carry no trailing label — that would repeat down every member of a
+	// large group. They are underlined instead, which is what has to be
+	// asserted.
+	if !h.isLink("uid=jdoe,ou=People,dc=example,dc=com") {
 		t.Errorf("member should render as a link:\n%s", screen)
 	}
-	if strings.Contains(screen, "The engineering team  (enter to follow)") {
+	if h.isLink("The engineering team") {
 		t.Errorf("free text must not become a link:\n%s", screen)
 	}
 	// A DN outside every naming context is not navigable, so not a link.
-	if strings.Contains(screen, "cn=other,dc=elsewhere,dc=net  (enter to follow)") {
+	if h.isLink("cn=other,dc=elsewhere,dc=net") {
 		t.Errorf("a DN outside the tree must not become a link:\n%s", screen)
 	}
 
 	h.key(tcell.KeyTab)
-	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com  (enter to follow)")
+	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com")
 	h.key(tcell.KeyEnter)
 
 	// ou=People was never opened; the jump has to expand it on the way.
@@ -1270,7 +1299,7 @@ func TestFollowDNGoesBackUpToTheGroup(t *testing.T) {
 	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com", "Alice Smith")
 
 	h.key(tcell.KeyTab)
-	h.selectValueRow("cn=engineers,ou=Groups,dc=example,dc=com  (enter to follow)")
+	h.selectValueRow("cn=engineers,ou=Groups,dc=example,dc=com")
 	h.key(tcell.KeyEnter)
 
 	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com", "groupOfNames")
@@ -1297,37 +1326,15 @@ func TestFollowDNOutsideTheShownTreeExplainsItself(t *testing.T) {
 	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
 
 	// It is not offered as a link at all, because it cannot be reached.
-	if strings.Contains(h.text(), "cn=admin,dc=hidden,dc=com  (enter to follow)") {
+	if h.isLink("cn=admin,dc=hidden,dc=com") {
 		t.Errorf("an unreachable DN must not be offered as a link:\n%s", h.text())
 	}
 }
 
-// A member that no longer exists must say so plainly rather than leaving the
-// cursor somewhere arbitrary.
-func TestFollowDNReportsAMissingEntry(t *testing.T) {
-	d := withGroup(sampleDir())
-	engineers := "cn=engineers,ou=Groups,dc=example,dc=com"
-	ghost := "uid=ghost,ou=People,dc=example,dc=com"
-	d.entries[engineers].Attributes = append(d.entries[engineers].Attributes, attr("member", ghost))
-
-	h := start(t, testProfile(), okConnector(d), nil)
-	h.waitFor("ou=Groups")
-	h.key(tcell.KeyDown)
-	h.key(tcell.KeyRight)
-	h.waitFor("cn=engineers")
-	h.key(tcell.KeyDown)
-	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
-
-	h.key(tcell.KeyTab)
-	h.selectValueRow(ghost + "  (enter to follow)")
-	h.key(tcell.KeyEnter)
-
-	h.waitFor("uid=ghost,ou=People,dc=example,dc=com does not exist under ou=People,dc=example,dc=com")
-}
-
-// When the target sits beyond the pages loaded so far, say that — it is a
-// different problem from the entry not existing, and it has a fix.
-func TestFollowDNReportsUnloadedPagesRatherThanAbsence(t *testing.T) {
+// A link into a container bigger than one page must still land on the entry:
+// the jump keeps pulling pages until it finds it, rather than giving up at the
+// first page and leaving the cursor at the root.
+func TestFollowDNPagesUntilItFindsTheEntry(t *testing.T) {
 	d := withGroup(withManyUsers(sampleDir(), 10))
 	people := "ou=People,dc=example,dc=com"
 	engineers := "cn=engineers,ou=Groups,dc=example,dc=com"
@@ -1335,7 +1342,7 @@ func TestFollowDNReportsUnloadedPagesRatherThanAbsence(t *testing.T) {
 	d.entries[engineers].Attributes = append(d.entries[engineers].Attributes, attr("member", target))
 
 	p := testProfile()
-	p.PageSize = 2
+	p.PageSize = 2 // five pages before user09 shows up
 	h := start(t, p, okConnector(d), nil)
 	h.waitFor("ou=Groups")
 	h.key(tcell.KeyDown)
@@ -1345,15 +1352,19 @@ func TestFollowDNReportsUnloadedPagesRatherThanAbsence(t *testing.T) {
 	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
 
 	h.key(tcell.KeyTab)
-	h.selectValueRow(target + "  (enter to follow)")
+	h.selectValueRow(target)
 	h.key(tcell.KeyEnter)
 
-	h.waitFor("is not in the", "children of", "loaded so far — load more and try again")
+	h.waitFor("dn: uid=user09,ou=People,dc=example,dc=com")
+	h.waitFor("[u] uid=user09")
+	if !h.rowHighlighted("[u] uid=user09", 2*time.Second) {
+		t.Errorf("the jump should leave the cursor on the entry:\n%s", h.text())
+	}
 }
 
-// Same jump on a server that cannot page: the advice has to change, because
-// loading more is not on offer.
-func TestFollowDNReportsTruncationOnAnUnpagedServer(t *testing.T) {
+// When the tree genuinely cannot show the entry — the server will not page —
+// the entry is loaded on its own rather than the jump appearing to do nothing.
+func TestFollowDNShowsTheEntryWhenTheTreeCannotReachIt(t *testing.T) {
 	d := withGroup(withManyUsers(sampleDir(), 10))
 	d.noPaging = true
 	people := "ou=People,dc=example,dc=com"
@@ -1372,10 +1383,35 @@ func TestFollowDNReportsTruncationOnAnUnpagedServer(t *testing.T) {
 	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
 
 	h.key(tcell.KeyTab)
-	h.selectValueRow(target + "  (enter to follow)")
+	h.selectValueRow(target)
 	h.key(tcell.KeyEnter)
 
-	h.waitFor("was not among the first", "raise the profile's child limit")
+	// The object pane shows it, and the status says why it has no row.
+	h.waitFor("dn: uid=user09,ou=People,dc=example,dc=com")
+	h.waitFor("showing it on its own")
+}
+
+// A member that does not exist is a different thing from one that is merely
+// unloaded, and must still be reported as missing.
+func TestFollowDNReportsAnEntryThatIsGenuinelyMissing(t *testing.T) {
+	d := withGroup(sampleDir())
+	engineers := "cn=engineers,ou=Groups,dc=example,dc=com"
+	ghost := "uid=ghost,ou=People,dc=example,dc=com"
+	d.entries[engineers].Attributes = append(d.entries[engineers].Attributes, attr("member", ghost))
+
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=Groups")
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	h.key(tcell.KeyTab)
+	h.selectValueRow(ghost)
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("uid=ghost,ou=People,dc=example,dc=com does not exist under ou=People,dc=example,dc=com")
 }
 
 // ------------------------------------------------------------------ search
@@ -1612,6 +1648,7 @@ func TestBookmarkJumpsToADeepEntry(t *testing.T) {
 	h.rune('c')
 	h.waitFor("Servers")
 	h.key(tcell.KeyEnter)
+	h.waitConnected()
 	h.waitFor("ou=People")
 
 	h.rune('B')
@@ -1806,4 +1843,151 @@ func TestRawFilterStillWorksAlongsideQuickSearch(t *testing.T) {
 	h.key(tcell.KeyEnter)
 
 	h.waitFor("1 for (uid=jdoe)", "uid=jdoe,ou=People,dc=example,dc=com")
+}
+
+// ---------------------------------------------------------------- history
+
+// Back and forward retrace deliberate jumps, the way a browser does. Scrolling
+// the tree is reading, not navigating, so it does not enter the history.
+func TestHistoryBackAndForward(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	// Browse manually to the group, then follow a member link.
+	h.key(tcell.KeyDown) // ou=Groups
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	h.key(tcell.KeyTab)
+	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+
+	// From the user, follow memberOf back to the group — a second jump.
+	h.key(tcell.KeyTab)
+	h.selectValueRow("cn=engineers,ou=Groups,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	// Back to the user.
+	h.rune('<')
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+	// Back again to where the browsing started.
+	h.rune('<')
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	// And forward through the same trail.
+	h.rune('>')
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+	h.rune('>')
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+}
+
+func TestHistoryAtTheEndsSaysSo(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('<')
+	h.waitFor("nothing to go back to")
+	h.rune('>')
+	h.waitFor("nothing to go forward to")
+}
+
+// A new jump after going back drops the forward trail, the same as a browser
+// following a link after the back button.
+func TestHistoryForwardIsDroppedByANewJump(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	h.key(tcell.KeyTab)
+	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+
+	h.rune('<')
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	// A fresh jump from here: forward should no longer lead to jdoe.
+	h.rune('g')
+	h.waitFor("Go to DN")
+	h.typeString("uid=asmith,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyTab)
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com")
+
+	h.rune('>')
+	h.waitFor("nothing to go forward to")
+}
+
+// Alt-Left and Alt-Right do the same thing, for people who reach for the
+// browser bindings.
+func TestHistoryAltArrowBindings(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('g')
+	h.waitFor("Go to DN")
+	h.typeString("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyTab)
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+
+	h.screen.InjectKey(tcell.KeyLeft, 0, tcell.ModAlt)
+	h.waitFor("dn: dc=example,dc=com")
+	h.screen.InjectKey(tcell.KeyRight, 0, tcell.ModAlt)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+}
+
+// Reconnecting starts a fresh trail: the old one points into a tree that is no
+// longer on screen.
+func TestHistoryResetsOnReconnect(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('g')
+	h.waitFor("Go to DN")
+	h.typeString("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyTab)
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+
+	h.rune('c')
+	h.waitFor("disconnected")
+	h.rune('c')
+	h.waitFor("Servers")
+	h.key(tcell.KeyEnter)
+	h.waitConnected()
+	h.waitFor("ou=People")
+
+	h.rune('<')
+	h.waitFor("nothing to go back to")
+}
+
+// History keys while disconnected must say why nothing happened, rather than
+// doing nothing at all.
+func TestHistoryWhileDisconnectedSaysSo(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('c')
+	h.waitFor("disconnected")
+
+	h.rune('<')
+	h.waitFor("not connected")
+	h.rune('>')
+	h.waitFor("not connected")
 }

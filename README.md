@@ -31,8 +31,9 @@ PADL  Lab  ldaps://ldap.example.com:636  OpenLDAP
   GUIDs and SIDs, `userAccountControl` decoded to flag names, timestamps in local
   time, everything else as a hex dump on demand.
 - **Followable DNs**: press enter on a `member`, `memberOf`, `manager` — any value
-  holding a DN — and the tree jumps to that entry, opening whatever is closed on
-  the way.
+  holding a DN, shown underlined — and the tree jumps to that entry, opening
+  whatever is closed on the way and paging into large containers to find it.
+- **Back and forward** through the entries you have visited, like a browser.
 - **Search**: type bare words for a quick search — `mar nor` finds entries where
   something starts with `mar` *and* something starts with `nor`, across the
   attributes that server actually supports — or start with `(` to write the LDAP
@@ -93,6 +94,8 @@ Run `padl`, press `p` to open the server list, then `a` to add a server.
 | `/` | search below the selected entry |
 | `ctrl-s` | cycle the search scope (in the filter bar) |
 | `g` | go to a DN you type in |
+| `alt-←` / `<` | back to the previously visited entry |
+| `alt-→` / `>` | forward again |
 | `b` / `B` | bookmark the selection / open the bookmark list |
 | `L` | copy the entry as LDIF |
 | `E` | export the entry and everything under it to a file |

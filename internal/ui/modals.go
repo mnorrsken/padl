@@ -210,55 +210,44 @@ func valueInspector(attr string, v ldapx.Value, onClose func()) tview.Primitive 
 	return center(frame, 80, 24)
 }
 
-const helpText = `[::b]Panes[-::-]
+const helpText = `[::b]Anywhere[-::-]
   Tab / Shift-Tab   move between the left pane and the object pane
-  /                 search below the selected entry
-  g                 go to a DN you type in
-  B                 bookmarks       b   bookmark / unbookmark the selection
-  p                 profiles        c   connect / disconnect
-  ?                 this help       q   quit
-  Esc               cancel whatever is loading, or close what is open
+  /  search         g  go to a DN        Alt-Left  / <   back
+  p  servers        b  bookmark this     Alt-Right / >   forward
+  c  connect        B  bookmarks         ?  help    q  quit
+  Esc               cancel what is loading, or close what is open
 
 [::b]Tree[-::-]
-  Up / Down, j / k  move
+  Up/Down, j/k      move
   Right, l, Enter   expand — loads children on first open
   Left, h           collapse, or step up to the parent
   Enter on "…"      load the next page of a large container
-  r                 reload the selected node from the server
-  y                 copy the selected DN
-  a                 show / hide the hidden naming contexts
-  L                 copy the entry as LDIF
-  E                 export the entry and everything under it to a file
+  r  reload node    y  copy DN           a  show all naming contexts
+  L  copy as LDIF   E  export this entry and everything under it
 
 [::b]Search[-::-]
   /                 open the filter bar, based at the selected entry
-  words             a quick search: every word must match, each against
-                    any of the attributes the bar lists. "mar nor" finds
-                    entries where something starts with mar and something
-                    starts with nor. The attributes depend on the server.
-  (filter)          anything starting with ( is sent as a raw LDAP filter
-  Ctrl-S            cycle the scope: sub, base, one
-  Up / Down         walk this session's filter history
-  Enter             run it — results replace the tree on the left
+  words             quick search: every word must match, each against
+                    any of the attributes the bar lists, by prefix.
+                    "mar nor" finds entries matching both.
+  (filter)          input starting with ( is sent as a raw LDAP filter
+  Ctrl-S  scope     Up/Down  filter history      Enter  run
 
 [::b]Results[-::-]
-  Up / Down, j / k  move; the object pane follows
+  Up/Down, j/k      move; the object pane follows
   Enter             go to that entry in the tree
-  y                 copy the selected DN
-  Esc               back to the tree
+  y  copy DN        Esc  back to the tree
 
 [::b]Object pane[-::-]
-  Up / Down, j / k  move between values
-  Enter             follow a DN to that entry, or inspect the value in full
-  o                 show / hide operational attributes
-  y                 copy the selected value
-  L                 copy the entry as LDIF
+  Up/Down, j/k      move between values
+  Enter             follow a DN, or inspect the value in full.
+                    Underlined values are DNs you can follow.
+  o  operational    y  copy value        L  copy entry as LDIF
 
 [::b]Files[-::-]
-  Profiles and pinned certificates live in the PADL config directory;
-  padl -paths prints where. Bind passwords are never written there:
-  they go to the OS keychain, come from PADL_PASSWORD_<ID>, or are
-  typed on each connect.`
+  padl -paths prints where profiles and pinned certificates live.
+  Bind passwords are never written there: they go to the OS keychain,
+  come from PADL_PASSWORD_<ID>, or are typed on each connect.`
 
 func helpView(onClose func()) tview.Primitive {
 	body := tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetText(helpText)

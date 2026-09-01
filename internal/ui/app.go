@@ -28,8 +28,9 @@ type Options struct {
 	Trust    *config.TrustStore
 	Secrets  *config.Secrets
 
-	// Screen is the terminal to draw on. Tests pass a tcell SimulationScreen;
-	// production leaves it nil for a real one.
+	// Screen is the terminal to draw on. Tests pass a tcell SimulationScreen.
+	// Production leaves it nil so tview opens the real terminal itself — which
+	// is the only path that reports a failure to open it, see New.
 	Screen tcell.Screen
 
 	// Connect defaults to ldapx.Connect.
@@ -71,6 +72,12 @@ type App struct {
 
 	dir     ldapx.Directory
 	profile config.Profile
+	// back and forward are the visited-entry history, the way a browser keeps
+	// one. Only deliberate jumps are recorded — following a link, a search
+	// result, a bookmark, go-to-DN — not every cursor move, because scrolling
+	// through a container is reading rather than navigating.
+	back    []string
+	forward []string
 	// generation counts connections. Work started against one connection must
 	// not land on the next: a search abandoned by a disconnect can still return
 	// data, and applying it would repopulate the screen from a closed session.
@@ -109,6 +116,15 @@ func New(opts Options) *App {
 	if a.screen != nil {
 		a.SetScreen(a.screen)
 	}
+	// When tview opens the terminal itself, this is how the screen is obtained:
+	// there is no getter for it, and it is needed for the OSC 52 clipboard.
+	// Creating it here instead and handing it to SetScreen would look tidier
+	// but loses the Init error — SetScreen discards it, and the failure then
+	// surfaces as a nil-channel panic on shutdown rather than a message.
+	a.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		a.screen = screen
+		return false
+	})
 
 	a.header.SetBackgroundColor(colorBackground)
 
@@ -422,6 +438,18 @@ func (a *App) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
 	case tcell.KeyBacktab:
 		a.focusNext()
 		return nil
+	case tcell.KeyLeft:
+		// Alt-left and alt-right are the browser bindings; the pane keys keep
+		// plain arrows.
+		if ev.Modifiers()&tcell.ModAlt != 0 {
+			a.goBack()
+			return nil
+		}
+	case tcell.KeyRight:
+		if ev.Modifiers()&tcell.ModAlt != 0 {
+			a.goForward()
+			return nil
+		}
 	case tcell.KeyCtrlC:
 		return ev
 	}
@@ -447,6 +475,14 @@ func (a *App) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case 'g':
 		a.promptJumpToDN()
+		return nil
+	case '<':
+		// The same as alt-left, for layouts where alt-arrow is awkward or the
+		// terminal eats it.
+		a.goBack()
+		return nil
+	case '>':
+		a.goForward()
 		return nil
 	}
 
@@ -558,7 +594,7 @@ func (a *App) leftPrimitive() tview.Primitive {
 }
 
 func (a *App) refreshHints() {
-	common := "tab pane · / search · g goto · B bookmarks · p servers · ? help · q quit"
+	common := "tab pane · / search · g goto · < > history · B bookmarks · p servers · ? help · q quit"
 	switch {
 	case a.modalOpen():
 		a.status.setKeys("esc close dialog")
@@ -569,7 +605,7 @@ func (a *App) refreshHints() {
 	case a.GetFocus() == a.tree:
 		a.status.setKeys("[tree] enter expand · r reload · y copy dn · b bookmark · L ldif · E export · " + common)
 	default:
-		a.status.setKeys("[object] enter inspect · o operational · y copy value · " + common)
+		a.status.setKeys("[object] enter follow/inspect · o operational · y copy value · L ldif · " + common)
 	}
 }
 
@@ -714,6 +750,7 @@ func (a *App) adopt(p config.Profile, dir ldapx.Directory, password string, save
 	a.dir = dir
 	a.profile = p
 	a.showAll = false
+	a.back, a.forward = nil, nil
 
 	if savePassword {
 		if err := a.opts.Secrets.Store(p, password); err != nil {
@@ -1022,17 +1059,35 @@ func (a *App) confirmDelete(p config.Profile, done func()) {
 
 // ------------------------------------------------------------ jump to a DN
 
+// jumpMaxPages bounds how far a jump will page through a container looking for
+// its target. A jump should be willing to work for it, but not to walk a
+// hundred-thousand-entry container to the end while the user waits.
+const jumpMaxPages = 20
+
+// walk is one in-progress jump down the tree.
+type walk struct {
+	path []string
+	// index is the step being resolved.
+	index int
+	// pages counts what has been loaded looking for the current step, so a
+	// container far larger than expected does not page forever.
+	pages int
+}
+
 // jumpToDN moves the tree cursor to dn, opening whatever is closed on the way.
 //
 // This is what makes group membership navigable: member, memberOf, manager and
 // the rest all hold DNs, and reading one only to type it back in by hand is the
 // slowest part of using a directory browser.
-func (a *App) jumpToDN(dn string) {
+func (a *App) jumpToDN(dn string) { a.navigateTo(dn, true) }
+
+// navigateTo goes to a DN. record is false when the move is itself a history
+// step, so going back does not push what it is coming from.
+func (a *App) navigateTo(dn string, record bool) {
 	if a.dir == nil {
 		return
 	}
-	bases := a.tree.bases()
-	base := ldapx.BestBase(dn, bases)
+	base := ldapx.BestBase(dn, a.tree.bases())
 	if base == "" {
 		// Most often an AD entry in the Configuration partition, which is
 		// hidden by default — so say which key reveals it.
@@ -1044,27 +1099,37 @@ func (a *App) jumpToDN(dn string) {
 		a.status.warn("cannot work out where %s sits in the tree", dn)
 		return
 	}
+	if record {
+		a.recordJump(dn)
+	}
 	a.status.info("going to %s…", dn)
-	a.walkTo(path, 0)
+	a.walkTo(&walk{path: path})
 }
 
 // walkTo steps down one level of a jump, expanding as it goes.
 //
 // Each expansion is a round trip, so this cannot be a loop: every step that has
-// to load resumes the walk from expandNode's completion callback.
-func (a *App) walkTo(path []string, i int) {
-	if i >= len(path) {
+// to load resumes the walk from fetchChildren's completion callback.
+func (a *App) walkTo(w *walk) {
+	if w.index >= len(w.path) {
 		return
 	}
-	target := path[i]
+	target := w.path[w.index]
 
 	n := a.tree.find(target)
 	if n == nil {
-		a.reportJumpMiss(path, i)
+		// Not among the children loaded so far. If the parent has more pages,
+		// the entry may simply be further down: keep pulling pages rather than
+		// declaring it missing, which is the difference between a link that
+		// works and one that works only for small containers.
+		if a.pageTowards(w) {
+			return
+		}
+		a.jumpMissed(w)
 		return
 	}
 
-	if i == len(path)-1 {
+	if w.index == len(w.path)-1 {
 		a.tree.SetCurrentNode(n)
 		a.SetFocus(a.tree)
 		a.refreshHints()
@@ -1074,44 +1139,86 @@ func (a *App) walkTo(path []string, i int) {
 
 	ref := refOf(n)
 	if ref == nil {
-		a.reportJumpMiss(path, i)
+		a.jumpMissed(w)
 		return
 	}
 	if ref.loaded {
 		n.SetExpanded(true)
-		a.walkTo(path, i+1)
+		a.walkTo(&walk{path: w.path, index: w.index + 1})
 		return
 	}
 	// Not loaded yet. Expand it — deliberately bypassing the is-this-a-leaf
 	// check, since an entry on the path to another one demonstrably has
 	// children whatever the server claimed.
-	a.expandNode(n, ref, func() { a.walkTo(path, i+1) })
+	a.fetchChildren(n, ref, ldapx.PageRequest{Size: a.profile.Limit()}, false, func() {
+		a.walkTo(&walk{path: w.path, index: w.index + 1})
+	})
 }
 
-// reportJumpMiss explains a jump that ran out of tree. The parent's state says
-// which of the two reasons it was, and they call for different fixes.
-func (a *App) reportJumpMiss(path []string, i int) {
-	missing := path[i]
-	if i == 0 {
+// pageTowards loads another page of the parent container and resumes the walk,
+// reporting whether it did. It stops at jumpMaxPages so an enormous container
+// cannot hold a jump open indefinitely.
+func (a *App) pageTowards(w *walk) bool {
+	if w.index == 0 || w.pages >= jumpMaxPages {
+		return false
+	}
+	parent := a.tree.find(w.path[w.index-1])
+	if parent == nil {
+		return false
+	}
+	ref := refOf(parent)
+	if ref == nil || ref.loading || len(ref.cookie) == 0 {
+		return false
+	}
+
+	next := &walk{path: w.path, index: w.index, pages: w.pages + 1}
+	a.fetchChildren(parent, ref,
+		ldapx.PageRequest{Size: a.profile.Limit(), Cookie: ref.cookie}, true,
+		func() { a.walkTo(next) })
+	return true
+}
+
+// jumpMissed handles a target the tree cannot show.
+//
+// Rather than leaving the cursor wherever it happened to be — which reads as
+// the jump having done nothing at all — the entry is read on its own and put in
+// the object pane. You still see what you asked for; it just has no row in the
+// tree yet.
+func (a *App) jumpMissed(w *walk) {
+	target := w.path[len(w.path)-1]
+	missing := w.path[w.index]
+
+	if w.index == 0 {
 		a.status.errorf("%s is not in the tree", missing)
 		return
 	}
-	parent := path[i-1]
-	if p := a.tree.find(parent); p != nil {
+
+	parentDN := w.path[w.index-1]
+	if p := a.tree.find(parentDN); p != nil {
 		if ref := refOf(p); ref != nil {
 			switch {
 			case len(ref.cookie) > 0:
-				a.status.errorf("%s is not in the %d children of %s loaded so far — load more and try again",
-					missing, ref.childCount, parent)
+				a.showEntryOutsideTree(target, fmt.Sprintf(
+					"%s is more than %d pages into %s — showing it on its own",
+					missing, jumpMaxPages, parentDN))
 				return
 			case ref.truncated:
-				a.status.errorf("%s was not among the first %d children of %s — raise the profile's child limit",
-					missing, ref.childCount, parent)
+				a.showEntryOutsideTree(target, fmt.Sprintf(
+					"%s is not in the %d children of %s this server would return — showing it on its own",
+					missing, ref.childCount, parentDN))
 				return
 			}
 		}
 	}
-	a.status.errorf("%s does not exist under %s", missing, parent)
+	// The parent is fully listed and the entry is genuinely not under it.
+	a.status.errorf("%s does not exist under %s", missing, parentDN)
+}
+
+// showEntryOutsideTree loads an entry the tree cannot reach into the object
+// pane anyway.
+func (a *App) showEntryOutsideTree(dn, why string) {
+	a.loadEntry(dn)
+	a.status.warn("%s", why)
 }
 
 // -------------------------------------------------------------------- search
@@ -1211,6 +1318,73 @@ func (a *App) fetchResults(q ldapx.Query, req ldapx.PageRequest, appendPage bool
 			}
 		}, nil
 	})
+}
+
+// historyLimit caps the trail. Deep enough to retrace an afternoon of chasing
+// group memberships, shallow enough not to grow without bound.
+const historyLimit = 100
+
+// recordJump notes where the user is leaving from before a jump takes them
+// somewhere else, and drops any forward trail — the same thing a browser does
+// when you follow a link after going back.
+func (a *App) recordJump(to string) {
+	from := a.currentDN()
+	if from == "" || ldapx.EqualDN(from, to) {
+		return
+	}
+	a.back = append(a.back, from)
+	if len(a.back) > historyLimit {
+		a.back = a.back[len(a.back)-historyLimit:]
+	}
+	a.forward = nil
+}
+
+// currentDN is where the user is now: the tree cursor, or the entry the object
+// pane is showing when the tree cannot reach it.
+func (a *App) currentDN() string {
+	if dn := a.tree.currentDN(); dn != "" {
+		return dn
+	}
+	if e := a.object.entry; e != nil {
+		return e.DN
+	}
+	return ""
+}
+
+// goBack returns to the previously visited entry.
+func (a *App) goBack() {
+	if a.dir == nil {
+		a.status.warn("not connected")
+		return
+	}
+	if len(a.back) == 0 {
+		a.status.info("nothing to go back to")
+		return
+	}
+	dn := a.back[len(a.back)-1]
+	a.back = a.back[:len(a.back)-1]
+	if here := a.currentDN(); here != "" {
+		a.forward = append(a.forward, here)
+	}
+	a.navigateTo(dn, false)
+}
+
+// goForward undoes a goBack.
+func (a *App) goForward() {
+	if a.dir == nil {
+		a.status.warn("not connected")
+		return
+	}
+	if len(a.forward) == 0 {
+		a.status.info("nothing to go forward to")
+		return
+	}
+	dn := a.forward[len(a.forward)-1]
+	a.forward = a.forward[:len(a.forward)-1]
+	if here := a.currentDN(); here != "" {
+		a.back = append(a.back, here)
+	}
+	a.navigateTo(dn, false)
 }
 
 // jumpFromResults takes the chosen hit back into the tree, which is where the

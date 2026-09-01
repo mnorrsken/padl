@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/gdamore/tcell/v2"
-
 	"github.com/mnorrsken/padl/internal/config"
 	"github.com/mnorrsken/padl/internal/ui"
 	"github.com/mnorrsken/padl/internal/version"
@@ -57,21 +55,19 @@ func run() error {
 		return err
 	}
 
-	// The screen is created here rather than left to tview so the app can also
-	// use it for the terminal's OSC 52 clipboard.
-	screen, err := tcell.NewScreen()
-	if err != nil {
-		return fmt.Errorf("open terminal: %w", err)
-	}
-
+	// The terminal is left to tview to open: it is the only path that reports
+	// a failure to do so. Opening it here and passing it in would mean the
+	// Init error is thrown away.
 	app := ui.New(ui.Options{
 		Profiles:       profiles,
 		Trust:          trust,
 		Secrets:        config.NewSecrets(),
-		Screen:         screen,
 		InitialProfile: *profileID,
 	})
-	return app.Run()
+	if err := app.Run(); err != nil {
+		return fmt.Errorf("open terminal: %w", err)
+	}
+	return nil
 }
 
 func usage() {

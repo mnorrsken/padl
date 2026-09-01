@@ -151,24 +151,23 @@ func (o *objectPane) show(e *ldapx.Entry) {
 
 		valueColor := colorText
 		attrs := tcell.AttrNone
-		text := r.value.Text
 		switch {
 		case r.link != "":
-			// Underlined rather than a new colour: it reads as a link in any
-			// palette, and operational links stay dim.
+			// Underlined and coloured, with no trailing label: repeating
+			// "(enter to follow)" down a group with two hundred members is
+			// noise, and the styling already says it. What enter does is on
+			// the key hints line.
 			valueColor = colorLink
 			attrs = tcell.AttrUnderline
-			text += "  (enter to follow)"
 		case r.operational:
 			valueColor = colorDim
 		case r.value.Binary:
 			valueColor = colorBinary
-			text += "  (enter to inspect)"
 		}
 		if r.operational && r.link != "" {
 			valueColor = colorDim
 		}
-		o.table.SetCell(row, 1, tview.NewTableCell(tview.Escape(oneLine(text))).
+		o.table.SetCell(row, 1, tview.NewTableCell(tview.Escape(oneLine(r.value.Text))).
 			SetTextColor(valueColor).
 			SetAttributes(attrs).
 			SetSelectable(true).

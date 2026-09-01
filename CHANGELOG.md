@@ -2,6 +2,36 @@
 
 All notable changes to PADL.
 
+## [0.6.0] - 2026-09-01
+
+### Added
+- **Back and forward history** — `alt-←`/`<` and `alt-→`/`>` retrace the entries
+  you have visited, the way a browser does. Only deliberate jumps are recorded —
+  following a link, choosing a search result, a bookmark, go-to-DN — because
+  scrolling a container is reading rather than navigating. A new jump after
+  going back drops the forward trail.
+
+### Fixed
+- **Starting without a usable terminal crashed instead of explaining.** PADL
+  opened the screen itself and handed it to tview, which discards the `Init`
+  error, so a failure only surfaced later as a `close of nil channel` panic.
+  tview now opens the terminal, and its error is reported: running with no tty
+  gives `padl: open terminal: open /dev/tty: no such device or address`,
+  `TERM=dumb` gives `terminal not cursor addressable`.
+- **Following a link or a search result landed at the naming context** when the
+  target was not in the first page of its container. The jump now pages into the
+  container looking for it, up to twenty pages. If it still cannot be placed —
+  a server with no paged results, say — the entry is loaded into the object pane
+  on its own and the status says why, rather than the jump appearing to do
+  nothing.
+- **Choosing a search result no longer flashes the naming context** on the way,
+  which read as the jump having failed.
+- **`(enter to follow)` no longer repeats on every value.** A group with two
+  hundred members repeated it two hundred times; DN values are underlined
+  instead, and what enter does is on the key hints line. The same for
+  `(enter to inspect)` on binary values.
+- **Back and forward while disconnected** now say so instead of doing nothing.
+
 ## [0.5.0] - 2026-09-01
 
 ### Added

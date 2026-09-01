@@ -253,10 +253,10 @@ func TestIntegrationFollowMemberDN(t *testing.T) {
 	h.key(tcell.KeyRight)
 	h.waitFor("cn=engineers")
 	h.key(tcell.KeyDown)
-	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com", "(enter to follow)")
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
 
 	h.key(tcell.KeyTab)
-	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com  (enter to follow)")
+	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com")
 	h.key(tcell.KeyEnter)
 
 	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com", "John Doe")
@@ -279,10 +279,10 @@ func TestIntegrationLLDAPFollowDNThroughASynthesizedContainer(t *testing.T) {
 	h.key(tcell.KeyRight)
 	h.waitFor("cn=lldap_admin")
 	h.key(tcell.KeyDown)
-	h.waitFor("dn: cn=lldap_admin,ou=groups,dc=example,dc=com", "(enter to follow)")
+	h.waitFor("dn: cn=lldap_admin,ou=groups,dc=example,dc=com")
 
 	h.key(tcell.KeyTab)
-	h.selectValueRow("uid=admin,ou=people,dc=example,dc=com  (enter to follow)")
+	h.selectValueRow("uid=admin,ou=people,dc=example,dc=com")
 	h.key(tcell.KeyEnter)
 
 	h.waitFor("dn: uid=admin,ou=people,dc=example,dc=com")
@@ -425,4 +425,57 @@ func TestIntegrationQuickSearchUsesTheVendorsAttributes(t *testing.T) {
 	h.typeString("admin")
 	h.key(tcell.KeyEnter)
 	h.waitFor("for admin", "uid=admin,ou=people,dc=example,dc=com")
+}
+
+// A search result in a container bigger than one page must still land on the
+// entry, rather than leaving the cursor at the naming context.
+func TestIntegrationSearchJumpPagesIntoTheContainer(t *testing.T) {
+	requireIT(t)
+	p := labProfile(t, config.SecurityNone, envOr("PADL_IT_LDAP_PORT", "13389"))
+	p.PageSize = 1 // ou=People holds two users, so the target is on page two
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitConnected()
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("asmith")
+	h.key(tcell.KeyEnter)
+	h.waitFor("for asmith", "uid=asmith,ou=People,dc=example,dc=com")
+
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com", "Alice Smith")
+	h.waitFor("[u] uid=asmith")
+	if !h.rowHighlighted("[u] uid=asmith", 3*time.Second) {
+		t.Errorf("the result should be selected in the tree, not left at the root:\n%s", h.text())
+	}
+}
+
+// Back and forward against a real server, retracing a link between a group and
+// one of its members.
+func TestIntegrationHistoryBackAndForward(t *testing.T) {
+	requireIT(t)
+	p := labProfile(t, config.SecurityNone, envOr("PADL_IT_LDAP_PORT", "13389"))
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitConnected()
+	h.waitFor("ou=Groups")
+
+	h.key(tcell.KeyDown) // ou=Groups
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	h.key(tcell.KeyTab)
+	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
+
+	h.rune('<')
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+	h.rune('>')
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
 }
