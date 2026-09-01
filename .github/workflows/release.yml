@@ -66,10 +66,73 @@ jobs:
           PADL_IT: '1'
         run: go test -count=1 ./...
 
+  msi:
+    name: Build the Windows installer
+    runs-on: windows-latest
+    needs: [test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the Windows executables
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF -replace '^refs/tags/', ''
+          $commit  = git rev-parse --short HEAD
+          $pkg     = 'github.com/mnorrsken/padl'
+          $ldflags = "-s -w -X $pkg/internal/version.Version=$version -X $pkg/internal/version.Commit=$commit"
+          foreach ($arch in 'amd64', 'arm64') {
+            $env:GOOS = 'windows'; $env:GOARCH = $arch; $env:CGO_ENABLED = '0'
+            go build -trimpath -ldflags "$ldflags" -o "padl-$arch.exe" ./cmd/padl
+            if ($LASTEXITCODE -ne 0) { throw "build failed for $arch" }
+          }
+
+      - name: Install WiX
+        run: dotnet tool install --global wix --version 6.0.2
+
+      - name: Build the installers
+        shell: pwsh
+        run: |
+          $version = ($env:GITHUB_REF -replace '^refs/tags/v', '')
+          ./packaging/windows/build-msi.ps1 -Version $version -Arch x64   -ExePath padl-amd64.exe -OutDir dist
+          ./packaging/windows/build-msi.ps1 -Version $version -Arch arm64 -ExePath padl-arm64.exe -OutDir dist
+
+      # Only the x64 installer can be exercised here; an arm64 MSI will not
+      # install on an x64 runner.
+      - name: Install, run and uninstall the x64 installer
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist\*x64.msi)[0].FullName
+          $p = Start-Process msiexec -PassThru -Wait -NoNewWindow -ArgumentList @(
+            '/i', "`"$msi`"", '/quiet', '/norestart', '/l*v', 'install.log')
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "install failed: $($p.ExitCode)" }
+
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\PADL\padl.exe'
+          if (-not (Test-Path $exe)) { Get-Content install.log -Tail 60; throw "nothing landed at $exe" }
+          if (Test-Path (Join-Path $env:ProgramFiles 'PADL')) { throw "a per-user install wrote to Program Files" }
+          & $exe -version
+
+          $p = Start-Process msiexec -PassThru -Wait -NoNewWindow -ArgumentList @(
+            '/x', "`"$msi`"", '/quiet', '/norestart')
+          if ($p.ExitCode -ne 0) { throw "uninstall failed: $($p.ExitCode)" }
+
+      - name: Upload the installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: installers
+          path: dist/*.msi
+          if-no-files-found: error
+
   release:
     name: Create GitHub release
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, msi]
     permissions:
       contents: write
 
@@ -102,6 +165,12 @@ jobs:
                 -ldflags="-s -w -X ${PKG}/internal/version.Version=${VERSION} -X ${PKG}/internal/version.Commit=${COMMIT}" \
                 -o "$out" ./cmd/padl
           done
+
+      - name: Fetch the Windows installers
+        uses: actions/download-artifact@v7
+        with:
+          name: installers
+          path: dist
 
       - name: Compute sha256 checksums
         working-directory: dist
@@ -141,7 +210,10 @@ jobs:
           go install github.com/mnorrsken/padl/cmd/padl@${VERSION}
           \`\`\`
 
-          Or download a binary below, then:
+          On Windows, run the \`.msi\`: it installs to \`%LocalAppData%\\Programs\\PADL\`,
+          adds itself to your PATH, and needs no administrator rights.
+
+          On linux or macOS, download the matching binary below, then:
 
           \`\`\`sh
           chmod +x padl_${VERSION_NO_V}_\$(uname -s | tr 'A-Z' 'a-z')_\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')

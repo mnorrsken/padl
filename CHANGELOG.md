@@ -2,6 +2,27 @@
 
 All notable changes to PADL.
 
+## [0.3.0] - 2026-09-01
+
+### Added
+- **Windows installer (MSI)** — a **per-user** package: it installs to
+  `%LocalAppData%\Programs\PADL`, adds that to the user's `PATH`, and needs no
+  administrator rights, writing nothing outside the user's own profile. CI
+  builds it, asserts the package is not per-machine, then installs it, runs the
+  binary, checks nothing reached Program Files or the machine `PATH`, uninstalls
+  it and checks it left neither behind — on every push.
+- **`docs/windows.md`** — how to install, and what to do about "Access is
+  denied" on a managed laptop. PADL neither requires nor can request elevation:
+  the executable carries no resource section at all, so it has no application
+  manifest and therefore no `requestedExecutionLevel`. That message comes from
+  application allowlisting, antivirus, or a path rule, and the page gives the
+  commands to tell which.
+
+### Known limitations
+- Releases are **not code-signed**, which is the usual reason an allowlisting
+  policy rejects them. Until that changes, the practical route on a locked-down
+  machine is a hash-based allow rule using the published SHA-256.
+
 ## [0.2.0] - 2026-09-01
 
 ### Added

@@ -42,9 +42,12 @@ Editing, search and LDIF export are the next milestones.
 go install github.com/mnorrsken/padl/cmd/padl@latest
 ```
 
-Or download a binary for your platform from the
+Or download from the
 [releases page](https://github.com/mnorrsken/padl/releases) — linux, macOS and
-Windows, on amd64 and arm64.
+Windows, on amd64 and arm64. On Windows use the `.msi`: it installs to
+`%LocalAppData%\Programs\PADL`, adds itself to your PATH, and needs no
+administrator rights. See [docs/windows.md](docs/windows.md), which also covers
+what to do about "Access is denied" on a managed laptop.
 
 Or from a checkout:
 

@@ -65,7 +65,7 @@ Against lldap:
 | --- | --- | --- | --- |
 | macOS (arm64) | yes | full suite, plus integration against the lab | The development machine. |
 | Linux (amd64) | yes | full suite in CI, including integration | CI runs on ubuntu-latest. |
-| Windows | yes | unit tests only, on `windows-latest` in CI | No lab containers there, so nothing exercises a live server on Windows. Nobody has run the TUI on Windows by hand — see below. |
+| Windows | yes, plus an MSI | unit tests on `windows-latest` in CI; the MSI is built, installed, run and uninstalled there | No lab containers there, so nothing exercises a live server on Windows. Nobody has run the TUI on Windows by hand — see below and `docs/windows.md`. |
 
 ### What is unproven on Windows
 
@@ -83,6 +83,12 @@ prove:
 - **File protection.** `Chmod(0600)` only moves the read-only flag on Windows.
   `profiles.yaml` and `trust.yaml` are protected by the ACL they inherit from
   `%AppData%`, not by anything PADL does.
+- **Signing.** Nothing PADL ships is code-signed, which is the usual reason an
+  application-allowlisting policy refuses it on a managed machine.
+
+What the MSI *has* been proven to do, on every push: install per-user without
+writing to Program Files or the machine PATH, put a working `padl.exe` on the
+user PATH, and uninstall leaving neither behind.
 
 ## Adding a row
 
