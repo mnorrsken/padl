@@ -2,6 +2,35 @@
 
 All notable changes to PADL.
 
+## [0.4.0] - 2026-09-01
+
+Milestone 2: search and navigation.
+
+### Added
+- **Search** — `/` opens a filter bar taking raw LDAP filter syntax, based at
+  whatever the tree has selected so a search is naturally narrowed to where you
+  are standing. `Ctrl-S` cycles the scope without losing what you have typed,
+  and `↑`/`↓` walk this session's filter history. Results replace the tree on
+  the left; moving through them loads each entry on the right, and `enter` takes
+  the chosen one back into the tree with its surroundings.
+- **Paged results (RFC 2696)** — large containers and large result sets now load
+  a page at a time and offer the rest, instead of stopping at a limit. A server
+  that does not advertise paging still says plainly that the list was cut short
+  and what to do about it, rather than pretending there is more to fetch.
+- **Bookmarks** — `b` saves the selected DN on the profile, `B` opens the list,
+  and `enter` there goes to the entry, expanding whatever is closed on the way.
+- **Go to a DN** — `g` prompts for a DN, for when you have one on the clipboard
+  rather than on screen.
+- **LDIF** — `L` copies the current entry as RFC 2849 LDIF, and `E` exports the
+  selected entry and everything beneath it to a file. Values that are not
+  SAFE-STRING are base64-encoded, long lines are folded at 76 columns, and
+  operational attributes are left out so the result can be fed back in. An
+  existing file is never overwritten.
+
+### Changed
+- **Failures that need reading get a dialog**, not just the one-line status bar:
+  a rejected search filter and a failed export join connect failures there.
+
 ## [0.3.0] - 2026-09-01
 
 ### Added

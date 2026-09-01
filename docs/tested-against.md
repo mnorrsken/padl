@@ -51,6 +51,12 @@ simulated terminal — against the throwaway OpenLDAP:
 - LDAPS and StartTLS trust-on-first-use: prompt, pin, silent reconnect, and a
   mismatched pin reported as a change
 - context cancellation actually abandoning a search
+- RFC 2696 paging: a page size of one walks a container to the end, seeing every
+  entry exactly once and finishing with an empty cookie
+- search by filter, including a malformed filter being reported rather than
+  silently matching nothing
+- an LDIF export of a real subtree: version header, one record per entry, values
+  intact, no line over 76 columns
 
 Against lldap:
 
@@ -58,6 +64,9 @@ Against lldap:
 - the tree recovering `ou=people` and `ou=groups` from a flattened result
 - the root reporting an unreadable entry instead of showing the wrong one
 - the wrong-bind-DN dialog carrying the server's own explanation
+- the no-paging fallback: lldap advertises no controls at all, so results are
+  capped and reported as truncated rather than handed a cookie that would never
+  work
 
 ## Platforms
 

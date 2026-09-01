@@ -298,9 +298,10 @@ func KindOf(e *Entry) Kind {
 type Directory interface {
 	// RootDSE returns the server's root DSE, already parsed.
 	RootDSE(ctx context.Context) (*RootDSE, error)
-	// Children lists the immediate subordinates of dn. A limit of n returns at
-	// most n entries; truncated reports whether the server had more.
-	Children(ctx context.Context, dn string, limit int) (entries []Entry, truncated bool, err error)
+	// Children lists the immediate subordinates of dn, one page at a time.
+	Children(ctx context.Context, dn string, req PageRequest) (*Page, error)
+	// Search runs an arbitrary query, one page at a time.
+	Search(ctx context.Context, q Query, req PageRequest) (*Page, error)
 	// Entry reads a single entry. When operational is true the server's
 	// operational attributes are fetched as well.
 	Entry(ctx context.Context, dn string, operational bool) (*Entry, error)

@@ -143,15 +143,15 @@ func TestIntegrationBrowseTree(t *testing.T) {
 	}
 	defer c.Close()
 
-	children, truncated, err := c.Children(ctx(t), itBaseDN, 100)
+	page, err := c.Children(ctx(t), itBaseDN, ldapx.PageRequest{Size: 100})
 	if err != nil {
 		t.Fatalf("children: %v", err)
 	}
-	if truncated {
-		t.Error("the seed tree is small; nothing should be truncated")
+	if page.More() {
+		t.Error("the seed tree is small; one page should hold it")
 	}
 	rdns := map[string]bool{}
-	for _, e := range children {
+	for _, e := range page.Entries {
 		rdns[e.RDN()] = true
 	}
 	for _, want := range []string{"ou=People", "ou=Groups"} {
@@ -159,14 +159,99 @@ func TestIntegrationBrowseTree(t *testing.T) {
 			t.Errorf("children of %s = %v, want it to include %s", itBaseDN, rdns, want)
 		}
 	}
+}
 
-	// A truncating limit must both cut the list and say that it did.
-	short, truncated, err := c.Children(ctx(t), "ou=People,"+itBaseDN, 1)
+// Paging against a real server: a page size of one has to walk the container an
+// entry at a time and end with an empty cookie, having seen everything exactly
+// once.
+func TestIntegrationPagedChildren(t *testing.T) {
+	requireIT(t)
+	c, err := ldapx.Connect(ctx(t), itProfile(t, config.SecurityNone), nil, itAdminPwd)
 	if err != nil {
-		t.Fatalf("children with limit: %v", err)
+		t.Fatalf("connect: %v", err)
 	}
-	if len(short) != 1 || !truncated {
-		t.Errorf("limit 1 gave %d entries, truncated=%v", len(short), truncated)
+	defer c.Close()
+
+	if !c.SupportsPaging() {
+		t.Fatal("the lab OpenLDAP advertises RFC 2696; something is wrong with the check")
+	}
+
+	people := "ou=People," + itBaseDN
+	seen := map[string]int{}
+	req := ldapx.PageRequest{Size: 1}
+	pages := 0
+	for {
+		page, err := c.Children(ctx(t), people, req)
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		pages++
+		for _, e := range page.Entries {
+			seen[strings.ToLower(e.DN)]++
+		}
+		if !page.More() {
+			break
+		}
+		if pages > 20 {
+			t.Fatal("paging did not terminate")
+		}
+		req = page.Next(1)
+	}
+
+	if pages < 2 {
+		t.Errorf("a page size of 1 over two users should take more than one page, took %d", pages)
+	}
+	for _, want := range []string{"uid=jdoe," + people, "uid=asmith," + people} {
+		if seen[strings.ToLower(want)] != 1 {
+			t.Errorf("%s seen %d times across pages, want exactly 1", want, seen[strings.ToLower(want)])
+		}
+	}
+}
+
+// Search is what the filter bar runs.
+func TestIntegrationSearch(t *testing.T) {
+	requireIT(t)
+	c, err := ldapx.Connect(ctx(t), itProfile(t, config.SecurityNone), nil, itAdminPwd)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer c.Close()
+
+	page, err := c.Search(ctx(t), ldapx.Query{
+		BaseDN: itBaseDN,
+		Scope:  ldapx.ScopeSubtree,
+		Filter: "(uid=jdoe)",
+	}, ldapx.PageRequest{Size: 50})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(page.Entries) != 1 {
+		t.Fatalf("(uid=jdoe) matched %d entries, want 1", len(page.Entries))
+	}
+	if !strings.EqualFold(page.Entries[0].DN, "uid=jdoe,ou=People,"+itBaseDN) {
+		t.Errorf("matched %s", page.Entries[0].DN)
+	}
+
+	// A subtree search from the root reaches entries a one-level search cannot.
+	deep, err := c.Search(ctx(t), ldapx.Query{
+		BaseDN: itBaseDN,
+		Scope:  ldapx.ScopeSubtree,
+		Filter: "(objectClass=inetOrgPerson)",
+	}, ldapx.PageRequest{Size: 50})
+	if err != nil {
+		t.Fatalf("subtree search: %v", err)
+	}
+	if len(deep.Entries) < 2 {
+		t.Errorf("subtree search found %d people, want both seeded ones", len(deep.Entries))
+	}
+
+	// A malformed filter must come back as an error, not as an empty result.
+	if _, err := c.Search(ctx(t), ldapx.Query{
+		BaseDN: itBaseDN,
+		Scope:  ldapx.ScopeSubtree,
+		Filter: "(uid=",
+	}, ldapx.PageRequest{Size: 10}); err == nil {
+		t.Error("a malformed filter should be reported, not silently matched")
 	}
 }
 
@@ -246,7 +331,7 @@ func TestIntegrationLDAPSTrustOnFirstUse(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, _, err := c.Children(ctx(t), itBaseDN, 10); err != nil {
+	if _, err := c.Children(ctx(t), itBaseDN, ldapx.PageRequest{Size: 10}); err != nil {
 		t.Fatalf("search over LDAPS: %v", err)
 	}
 
@@ -283,7 +368,7 @@ func TestIntegrationStartTLSTrustOnFirstUse(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, _, err := c.Children(ctx(t), itBaseDN, 10); err != nil {
+	if _, err := c.Children(ctx(t), itBaseDN, ldapx.PageRequest{Size: 10}); err != nil {
 		t.Fatalf("search over StartTLS: %v", err)
 	}
 }
@@ -298,7 +383,7 @@ func TestIntegrationContextCancellationStopsASearch(t *testing.T) {
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := c.Children(cancelled, itBaseDN, 100); !errors.Is(err, context.Canceled) {
+	if _, err := c.Children(cancelled, itBaseDN, ldapx.PageRequest{Size: 100}); !errors.Is(err, context.Canceled) {
 		t.Errorf("a cancelled context should abandon the search, got %v", err)
 	}
 }
@@ -346,12 +431,12 @@ func TestIntegrationLLDAPBindAndBrowse(t *testing.T) {
 		t.Fatalf("naming contexts = %v, want %s", bases, itBaseDN)
 	}
 
-	children, _, err := c.Children(ctx(t), itBaseDN, 100)
+	page, err := c.Children(ctx(t), itBaseDN, ldapx.PageRequest{Size: 100})
 	if err != nil {
 		t.Fatalf("children: %v", err)
 	}
 	rdns := map[string]bool{}
-	for _, e := range children {
+	for _, e := range page.Entries {
 		rdns[strings.ToLower(e.RDN())] = true
 	}
 	if !rdns["ou=people"] {
@@ -410,5 +495,35 @@ func TestIntegrationLLDAPWrongPasswordDoesNotLeakIt(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "definitely-not-the-password") {
 		t.Errorf("the password leaked into the error text: %v", err)
+	}
+}
+
+// lldap advertises no controls at all, so it exercises the no-paging fallback
+// against a real server: the result is capped and reported as truncated rather
+// than handing back a cookie that would never work.
+func TestIntegrationLLDAPHasNoPagingSoResultsTruncate(t *testing.T) {
+	requireIT(t)
+	c, err := ldapx.Connect(ctx(t), itLLDAPProfile(t), nil, itAdminPwd)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer c.Close()
+
+	if c.SupportsPaging() {
+		t.Skip("this lldap advertises paged results; the fallback is not what runs here")
+	}
+
+	page, err := c.Children(ctx(t), "ou=groups,"+itBaseDN, ldapx.PageRequest{Size: 1})
+	if err != nil {
+		t.Fatalf("children: %v", err)
+	}
+	if len(page.Entries) != 1 {
+		t.Fatalf("asked for 1, got %d", len(page.Entries))
+	}
+	if !page.Truncated {
+		t.Error("the lab lldap has three groups, so one page of one is truncated")
+	}
+	if page.More() {
+		t.Error("a server without paging must not hand back a cookie; there is nothing to continue")
 	}
 }

@@ -242,20 +242,92 @@ func (c *Client) RootDSE(ctx context.Context) (*RootDSE, error) {
 // without a second round trip per child.
 var childAttrs = []string{"objectClass", "hasSubordinates", "numSubordinates", "subordinateCount"}
 
-// Children lists the immediate subordinates of dn, at most limit of them.
-func (c *Client) Children(ctx context.Context, dn string, limit int) ([]Entry, bool, error) {
-	if limit <= 0 {
-		limit = c.profile.Limit()
-	}
-	req := ldap.NewSearchRequest(dn, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, c.profile.Timeout(), false, "(objectClass=*)", childAttrs, nil)
-	entries, truncated, err := c.run(ctx, req, limit)
+// Children lists the immediate subordinates of dn, one page at a time.
+func (c *Client) Children(ctx context.Context, dn string, req PageRequest) (*Page, error) {
+	page, err := c.Search(ctx, Query{
+		BaseDN:     dn,
+		Scope:      ScopeOneLevel,
+		Filter:     "(objectClass=*)",
+		Attributes: childAttrs,
+	}, req)
 	if err != nil {
-		return nil, false, fmt.Errorf("list children of %s: %w", displayDN(dn), err)
+		return nil, fmt.Errorf("list children of %s: %w", displayDN(dn), err)
 	}
-	entries = directChildren(dn, entries)
-	SortEntries(entries)
-	return entries, truncated, nil
+	page.Entries = directChildren(dn, page.Entries)
+	SortEntries(page.Entries)
+	return page, nil
+}
+
+// Search runs a query and returns one page of results.
+func (c *Client) Search(ctx context.Context, q Query, req PageRequest) (*Page, error) {
+	size := req.Size
+	if size <= 0 {
+		size = c.profile.Limit()
+	}
+	filter := strings.TrimSpace(q.Filter)
+	if filter == "" {
+		filter = "(objectClass=*)"
+	}
+	attrs := q.Attributes
+	if len(attrs) == 0 {
+		attrs = childAttrs
+	}
+
+	search := ldap.NewSearchRequest(q.BaseDN, scopeOf(q.Scope), ldap.NeverDerefAliases,
+		0, c.profile.Timeout(), false, filter, attrs, nil)
+
+	// Without RFC 2696 there is no way to ask for the rest, so the best that can
+	// be done is to stop at the limit and say the result was cut short.
+	if !c.SupportsPaging() {
+		entries, truncated, err := c.run(ctx, search, size)
+		if err != nil {
+			return nil, searchError(q, err)
+		}
+		return &Page{Entries: entries, Truncated: truncated}, nil
+	}
+
+	paging := ldap.NewControlPaging(uint32(size))
+	paging.SetCookie(req.Cookie)
+	search.Controls = append(search.Controls, paging)
+
+	// The size is a page size now, not a cap, so nothing is dropped: read the
+	// whole page and hand back the cookie for the next one.
+	entries, _, controls, err := c.runPaged(ctx, search, size)
+	if err != nil {
+		return nil, searchError(q, err)
+	}
+	return &Page{Entries: entries, Cookie: pagingCookie(controls)}, nil
+}
+
+// searchError wraps a failure with the query that caused it, since a bad filter
+// is by far the most likely reason and the filter is what the user has to fix.
+func searchError(q Query, err error) error {
+	if strings.TrimSpace(q.Filter) != "" && q.Filter != "(objectClass=*)" {
+		return fmt.Errorf("search %s under %s: %w", q.Filter, displayDN(q.BaseDN), err)
+	}
+	return fmt.Errorf("search under %s: %w", displayDN(q.BaseDN), err)
+}
+
+func scopeOf(s Scope) int {
+	switch s {
+	case ScopeBase:
+		return ldap.ScopeBaseObject
+	case ScopeOneLevel:
+		return ldap.ScopeSingleLevel
+	default:
+		return ldap.ScopeWholeSubtree
+	}
+}
+
+// pagingCookie digs the continuation cookie out of a searchResDone's controls.
+// An absent control, or an empty cookie, both mean this was the last page.
+func pagingCookie(controls []ldap.Control) []byte {
+	ctrl := ldap.FindControl(controls, ldap.ControlTypePaging)
+	paging, ok := ctrl.(*ldap.ControlPaging)
+	if !ok || paging == nil || len(paging.Cookie) == 0 {
+		return nil
+	}
+	return paging.Cookie
 }
 
 // directChildren reduces a one-level result to entries that really are one
@@ -437,6 +509,41 @@ func (c *Client) run(ctx context.Context, req *ldap.SearchRequest, limit int) ([
 		return nil, false, err
 	}
 	return entries, truncated, nil
+}
+
+// runPaged is run() for a search carrying a paging control: it reads the whole
+// page rather than stopping at a cap, and keeps the controls from the
+// searchResDone message, which is where the continuation cookie lives.
+func (c *Client) runPaged(ctx context.Context, req *ldap.SearchRequest, size int) ([]Entry, bool, []ldap.Control, error) {
+	conn, err := c.live()
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	var (
+		entries  []Entry
+		controls []ldap.Control
+	)
+	res := conn.SearchAsync(ctx, req, 64)
+	for res.Next() {
+		entry := res.Entry()
+		if entry == nil {
+			// The entry-less message: a referral, or the searchResDone whose
+			// controls carry the cookie. Keep whatever controls it had.
+			if cs := res.Controls(); len(cs) > 0 {
+				controls = cs
+			}
+			continue
+		}
+		entries = append(entries, convertEntry(entry))
+	}
+	if ctx.Err() != nil {
+		return nil, false, nil, ctx.Err()
+	}
+	if err := res.Err(); err != nil {
+		return nil, false, nil, err
+	}
+	return entries, len(entries) > size, controls, nil
 }
 
 // convertEntry maps a go-ldap entry onto PADL's own, keeping raw bytes so

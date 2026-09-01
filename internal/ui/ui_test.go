@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +39,11 @@ type fakeDir struct {
 	// entryHook, when set, runs at the start of every Entry call, so a test can
 	// hold a read open across a disconnect.
 	entryHook func()
+	// noPaging makes the fake behave like a server without RFC 2696: it
+	// truncates instead of handing back a cookie.
+	noPaging bool
+	// searchErr, when set, fails every Search — a bad filter, typically.
+	searchErr error
 
 	closed    bool
 	lastOpAsk bool // whether the last Entry call asked for operational attributes
@@ -128,35 +135,136 @@ func withGroup(d *fakeDir) *fakeDir {
 
 func ptr(e ldapx.Entry) *ldapx.Entry { return &e }
 
+// withManyUsers adds n users under ou=People so paging has something to page.
+func withManyUsers(d *fakeDir, n int) *fakeDir {
+	people := "ou=People,dc=example,dc=com"
+	for i := 0; i < n; i++ {
+		dn := fmt.Sprintf("uid=user%02d,%s", i, people)
+		d.children[people] = append(d.children[people], newEntry(dn, attr("objectClass", "inetOrgPerson")))
+		d.entries[dn] = ptr(newEntry(dn, attr("objectClass", "inetOrgPerson"), attr("uid", fmt.Sprintf("user%02d", i))))
+	}
+	return d
+}
+
 func (d *fakeDir) RootDSE(context.Context) (*ldapx.RootDSE, error) { return d.root, nil }
 
-func (d *fakeDir) Children(ctx context.Context, dn string, limit int) ([]ldapx.Entry, bool, error) {
+// Children pages the way a real server does: a cookie carries the offset, and
+// an empty cookie back means that was the last page. paging=false makes it
+// behave like a server with no RFC 2696 support, which truncates instead.
+func (d *fakeDir) Children(ctx context.Context, dn string, req ldapx.PageRequest) (*ldapx.Page, error) {
 	d.mu.Lock()
 	block := d.block
 	err := d.childErr[dn]
 	kids := append([]ldapx.Entry(nil), d.children[dn]...)
+	paging := !d.noPaging
 	d.mu.Unlock()
 
 	if block != nil {
 		select {
 		case <-block:
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if ctx.Err() != nil {
-		return nil, false, ctx.Err()
+		return nil, ctx.Err()
 	}
-	truncated := false
-	if limit > 0 && len(kids) > limit {
-		kids = kids[:limit]
-		truncated = true
-	}
+
 	ldapx.SortEntries(kids)
-	return kids, truncated, nil
+	return pageOf(kids, req, paging)
+}
+
+// Search filters the whole fake directory. The filter is not parsed: tests pass
+// a substring to match against the DN, which is enough to drive the UI without
+// reimplementing RFC 4515 in a test double.
+func (d *fakeDir) Search(ctx context.Context, q ldapx.Query, req ldapx.PageRequest) (*ldapx.Page, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.searchErr != nil {
+		return nil, d.searchErr
+	}
+
+	var hits []ldapx.Entry
+	for dn, e := range d.entries {
+		if ldapx.DepthUnder(dn, q.BaseDN) < 0 {
+			continue
+		}
+		switch q.Scope {
+		case ldapx.ScopeBase:
+			if !ldapx.EqualDN(dn, q.BaseDN) {
+				continue
+			}
+		case ldapx.ScopeOneLevel:
+			if ldapx.DepthUnder(dn, q.BaseDN) != 1 {
+				continue
+			}
+		}
+		if needle := searchNeedle(q.Filter); needle != "" &&
+			!strings.Contains(strings.ToLower(dn), strings.ToLower(needle)) {
+			continue
+		}
+		hits = append(hits, *e)
+	}
+	ldapx.SortEntries(hits)
+	return pageOf(hits, req, !d.noPaging)
+}
+
+// pageOf slices one page out of a result set, honouring the cookie as an
+// offset. Shared by Children and Search so both page the same way.
+func pageOf(hits []ldapx.Entry, req ldapx.PageRequest, paging bool) (*ldapx.Page, error) {
+	size := req.Size
+	if size <= 0 {
+		size = len(hits)
+	}
+
+	if !paging {
+		page := &ldapx.Page{Entries: hits}
+		if len(hits) > size {
+			page.Entries = hits[:size]
+			page.Truncated = true
+		}
+		return page, nil
+	}
+
+	offset := 0
+	if len(req.Cookie) > 0 {
+		n, err := strconv.Atoi(string(req.Cookie))
+		if err != nil {
+			return nil, fmt.Errorf("bad cookie %q", req.Cookie)
+		}
+		offset = n
+	}
+	if offset > len(hits) {
+		offset = len(hits)
+	}
+	end := offset + size
+	if end > len(hits) {
+		end = len(hits)
+	}
+
+	page := &ldapx.Page{Entries: hits[offset:end]}
+	if end < len(hits) {
+		page.Cookie = []byte(strconv.Itoa(end))
+	}
+	return page, nil
+}
+
+// searchNeedle pulls the value out of a simple (attr=value) filter.
+func searchNeedle(filter string) string {
+	f := strings.TrimSpace(filter)
+	f = strings.TrimPrefix(f, "(")
+	f = strings.TrimSuffix(f, ")")
+	if i := strings.Index(f, "="); i >= 0 {
+		return strings.Trim(f[i+1:], "*")
+	}
+	return ""
 }
 
 func (d *fakeDir) Entry(ctx context.Context, dn string, operational bool) (*ldapx.Entry, error) {
@@ -385,6 +493,39 @@ func (h *harness) waitUntil(what string, cond func() bool) {
 // for an 80-column dialog, so it is shown split across two lines.
 func fingerprintLines(fp string) []string {
 	return splitFingerprint(fp)
+}
+
+// loadAllPages walks to the "load more" row and presses it until every page is
+// in, waiting for each one to land before pressing again.
+//
+// Stepping blindly would either press enter on an ordinary row — which does
+// something quite different — or fire a second load before the first returned.
+func (h *harness) loadAllPages(rowMarker string) {
+	h.t.Helper()
+	const moreRow = "so far, enter for more"
+	for page := 0; page < 12; page++ {
+		if !strings.Contains(h.text(), moreRow) {
+			return
+		}
+		found := false
+		for i := 0; i < 40; i++ {
+			if h.rowHighlighted(moreRow, 150*time.Millisecond) {
+				found = true
+				break
+			}
+			h.key(tcell.KeyDown)
+		}
+		if !found {
+			h.t.Fatalf("could not reach the load-more row:\n%s", h.text())
+		}
+		before := strings.Count(h.text(), rowMarker)
+		h.key(tcell.KeyEnter)
+		h.waitUntil("the next page to arrive", func() bool {
+			return strings.Count(h.text(), rowMarker) > before ||
+				!strings.Contains(h.text(), moreRow)
+		})
+	}
+	h.t.Fatalf("paging never finished:\n%s", h.text())
 }
 
 func (h *harness) key(k tcell.Key) {
@@ -621,20 +762,62 @@ func TestEscapeCancelsInFlightSearch(t *testing.T) {
 	close(d.block)
 }
 
-func TestTruncatedContainerIsFlagged(t *testing.T) {
-	d := sampleDir()
-	base := "dc=example,dc=com"
-	for i := 0; i < 10; i++ {
-		dn := fmt.Sprintf("uid=user%02d,%s", i, base)
-		d.children[base] = append(d.children[base], newEntry(dn, attr("objectClass", "inetOrgPerson")))
-		d.entries[dn] = ptr(newEntry(dn, attr("objectClass", "inetOrgPerson")))
+// A container bigger than one page offers to load the rest, rather than
+// silently stopping.
+func TestPagedContainerOffersToLoadMore(t *testing.T) {
+	d := withManyUsers(sampleDir(), 10)
+
+	p := testProfile()
+	p.PageSize = 4
+	h := start(t, p, okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown) // ou=People
+	h.key(tcell.KeyRight)
+	h.waitFor("4 so far, enter for more")
+
+	// The first page is on screen and the rest is not, yet.
+	screen := h.text()
+	if !strings.Contains(screen, "uid=user00") {
+		t.Errorf("first page missing:\n%s", screen)
 	}
+	if strings.Contains(screen, "uid=user09") {
+		t.Errorf("the last page should not be loaded yet:\n%s", screen)
+	}
+
+	h.loadAllPages("uid=user")
+	h.waitFor("uid=user09")
+
+	// Once everything is loaded the offer goes away, and nothing is duplicated.
+	h.waitUntil("the load-more row to disappear", func() bool {
+		return !strings.Contains(h.text(), "enter for more")
+	})
+	if n := strings.Count(h.text(), "uid=user00"); n != 1 {
+		t.Errorf("uid=user00 appears %d times; paging duplicated a row:\n%s", n, h.text())
+	}
+}
+
+// A server without RFC 2696 cannot be asked for the rest, so the message has to
+// say so and point at the only lever there is.
+func TestUnpagedServerSaysItCannotFetchTheRest(t *testing.T) {
+	d := withManyUsers(sampleDir(), 10)
+	d.noPaging = true
 
 	p := testProfile()
 	p.PageSize = 3
 	h := start(t, p, okConnector(d), nil)
+	h.waitFor("ou=People")
 
-	h.waitFor("more than 3 entries")
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyRight)
+	h.waitFor("first 3 only (no paging)")
+	h.waitFor("this server has no paged results", "raise the profile's child limit")
+
+	if strings.Contains(h.text(), "enter for more") {
+		t.Error("there is no more to load on a server without paging; do not offer it")
+	}
 }
 
 // Opening a binary value and escaping back must return the keyboard to the
@@ -1099,17 +1282,39 @@ func TestFollowDNReportsAMissingEntry(t *testing.T) {
 	h.waitFor("uid=ghost,ou=People,dc=example,dc=com does not exist under ou=People,dc=example,dc=com")
 }
 
-// When the target's parent was truncated the entry may simply not have been
-// loaded, which is a different problem with a different fix.
-func TestFollowDNReportsTruncationRatherThanAbsence(t *testing.T) {
-	d := withGroup(sampleDir())
+// When the target sits beyond the pages loaded so far, say that — it is a
+// different problem from the entry not existing, and it has a fix.
+func TestFollowDNReportsUnloadedPagesRatherThanAbsence(t *testing.T) {
+	d := withGroup(withManyUsers(sampleDir(), 10))
 	people := "ou=People,dc=example,dc=com"
 	engineers := "cn=engineers,ou=Groups,dc=example,dc=com"
-	for i := 0; i < 10; i++ {
-		dn := fmt.Sprintf("uid=user%02d,%s", i, people)
-		d.children[people] = append(d.children[people], newEntry(dn, attr("objectClass", "inetOrgPerson")))
-		d.entries[dn] = ptr(newEntry(dn, attr("objectClass", "inetOrgPerson")))
-	}
+	target := fmt.Sprintf("uid=user09,%s", people)
+	d.entries[engineers].Attributes = append(d.entries[engineers].Attributes, attr("member", target))
+
+	p := testProfile()
+	p.PageSize = 2
+	h := start(t, p, okConnector(d), nil)
+	h.waitFor("ou=Groups")
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	h.key(tcell.KeyTab)
+	h.selectValueRow(target + "  (enter to follow)")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("is not in the", "children of", "loaded so far — load more and try again")
+}
+
+// Same jump on a server that cannot page: the advice has to change, because
+// loading more is not on offer.
+func TestFollowDNReportsTruncationOnAnUnpagedServer(t *testing.T) {
+	d := withGroup(withManyUsers(sampleDir(), 10))
+	d.noPaging = true
+	people := "ou=People,dc=example,dc=com"
+	engineers := "cn=engineers,ou=Groups,dc=example,dc=com"
 	target := fmt.Sprintf("uid=user09,%s", people)
 	d.entries[engineers].Attributes = append(d.entries[engineers].Attributes, attr("member", target))
 
@@ -1128,4 +1333,359 @@ func TestFollowDNReportsTruncationRatherThanAbsence(t *testing.T) {
 	h.key(tcell.KeyEnter)
 
 	h.waitFor("was not among the first", "raise the profile's child limit")
+}
+
+// ------------------------------------------------------------------ search
+
+func TestSearchFindsAnEntryAndJumpsToItInTheTree(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	// The bar says what it will search and where, so the base is never a guess.
+	h.waitFor("filter", "scope sub", "under dc=example,dc=com")
+
+	h.typeString("(uid=asmith)")
+	h.key(tcell.KeyEnter)
+
+	// Results replace the tree on the left.
+	h.waitFor("1 for (uid=asmith)", "uid=asmith,ou=People,dc=example,dc=com")
+	// Moving the cursor loads the entry on the right.
+	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com", "Alice Smith")
+
+	// Enter takes it back into the tree, expanding ou=People on the way.
+	h.key(tcell.KeyEnter)
+	h.waitFor("[u] uid=asmith")
+	if !h.rowHighlighted("[u] uid=asmith", 2*time.Second) {
+		t.Errorf("the chosen result should be selected in the tree:\n%s", h.text())
+	}
+	if strings.Contains(h.text(), "1 for (uid=asmith)") {
+		t.Errorf("the results pane should have given way to the tree:\n%s", h.text())
+	}
+}
+
+func TestSearchEscapeReturnsToTheTree(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	// Escaping the filter bar leaves the tree alone.
+	h.rune('/')
+	h.waitFor("filter")
+	h.key(tcell.KeyEscape)
+	h.waitUntil("the filter bar to close", func() bool {
+		return !strings.Contains(h.text(), "ctrl-s scope")
+	})
+	h.waitFor("[/] dc=example,dc=com")
+
+	// Escaping the results goes back to the tree too.
+	h.rune('/')
+	h.typeString("(uid=jdoe)")
+	h.key(tcell.KeyEnter)
+	h.waitFor("1 for (uid=jdoe)")
+	h.key(tcell.KeyEscape)
+	h.waitUntil("the results to close", func() bool {
+		return !strings.Contains(h.text(), "1 for (uid=jdoe)")
+	})
+	h.waitFor("[/] dc=example,dc=com", "ou=People")
+}
+
+func TestSearchWithNoMatchesSaysSo(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("(uid=nobody)")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("nothing matched")
+	h.waitFor("matched nothing under dc=example,dc=com")
+}
+
+// A filter the server rejects has to be shown in full, not reduced to a blank
+// result the user reads as "no matches".
+func TestSearchFailureIsShownInADialog(t *testing.T) {
+	d := withGroup(sampleDir())
+	d.searchErr = errors.New("LDAP result 87 (Filter Error): invalid filter syntax")
+
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("(uid=")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("Search failed", "Filter Error", "invalid filter syntax")
+}
+
+func TestSearchHistoryWalksBackAndForth(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	for _, filter := range []string{"(uid=jdoe)", "(uid=asmith)"} {
+		h.rune('/')
+		h.waitFor("filter")
+		h.typeString(filter)
+		h.key(tcell.KeyEnter)
+		h.waitFor("1 for " + filter)
+		h.key(tcell.KeyEscape)
+	}
+
+	h.rune('/')
+	h.waitFor("filter")
+	// Newest first.
+	h.key(tcell.KeyUp)
+	h.waitFor("(uid=asmith)")
+	h.key(tcell.KeyUp)
+	h.waitFor("(uid=jdoe)")
+	// Forward again, and past the end back to the empty draft.
+	h.key(tcell.KeyDown)
+	h.waitFor("(uid=asmith)")
+}
+
+// Ctrl-S changes the scope without disturbing what has been typed.
+func TestSearchScopeCyclesWithoutLosingTheFilter(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.waitFor("scope sub")
+	h.typeString("(uid=jdoe)")
+
+	h.screen.InjectKey(tcell.KeyCtrlS, 0, tcell.ModNone)
+	h.waitFor("scope base")
+	h.screen.InjectKey(tcell.KeyCtrlS, 0, tcell.ModNone)
+	h.waitFor("scope one")
+
+	if !strings.Contains(h.text(), "(uid=jdoe)") {
+		t.Errorf("cycling the scope lost the filter:\n%s", h.text())
+	}
+}
+
+// The base is whatever the tree has selected, so a search from inside a
+// container is naturally narrowed to it.
+func TestSearchBaseFollowsTheTreeSelection(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown) // ou=People
+	h.waitFor("dn: ou=People,dc=example,dc=com")
+
+	h.rune('/')
+	h.waitFor("under ou=People,dc=example,dc=com")
+}
+
+// Search results bigger than a page offer the rest, the same way the tree does.
+func TestSearchResultsPageOnDemand(t *testing.T) {
+	d := withManyUsers(sampleDir(), 10)
+	p := testProfile()
+	p.PageSize = 4
+
+	h := start(t, p, okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("(uid=user)")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("4 so far, enter for more")
+	if strings.Contains(h.text(), "uid=user09") {
+		t.Errorf("only the first page should be listed:\n%s", h.text())
+	}
+
+	h.loadAllPages("uid=user")
+
+	h.waitFor("uid=user09")
+	if n := strings.Count(h.text(), "uid=user00,"); n != 1 {
+		t.Errorf("uid=user00 listed %d times; paging duplicated a row:\n%s", n, h.text())
+	}
+}
+
+func TestSearchNeedsAConnection(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('c') // disconnect
+	h.waitFor("disconnected")
+	h.rune('/')
+	h.waitFor("not connected")
+}
+
+// -------------------------------------------------------- bookmarks and LDIF
+
+func TestBookmarkRoundTripThroughTheUI(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown) // ou=People
+	h.waitFor("dn: ou=People,dc=example,dc=com")
+	h.rune('b')
+	h.waitFor("bookmarked ou=People,dc=example,dc=com")
+
+	// It reached the profile store, not just the screen.
+	p, ok := h.profiles.Get("lab")
+	if !ok || !p.Bookmarked("ou=People,dc=example,dc=com") {
+		t.Fatalf("the bookmark did not reach the profile: %+v", p.Bookmarks)
+	}
+
+	// And it comes back as a way to navigate.
+	h.rune('B')
+	h.waitFor("Bookmarks — Lab", "ou=People,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: ou=People,dc=example,dc=com")
+
+	// Pressing b again removes it.
+	h.rune('b')
+	h.waitFor("removed the bookmark")
+	p, _ = h.profiles.Get("lab")
+	if p.Bookmarked("ou=People,dc=example,dc=com") {
+		t.Error("the bookmark should be gone from the profile")
+	}
+}
+
+func TestBookmarkJumpsToADeepEntry(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	// Bookmark a deep entry, go elsewhere, then come back through the list.
+	p, _ := h.profiles.Get("lab")
+	p.AddBookmark("uid=jdoe,ou=People,dc=example,dc=com")
+	if err := h.profiles.Put(p); err != nil {
+		t.Fatalf("seed bookmark: %v", err)
+	}
+	// The app holds its own copy of the profile, so reconnect to pick it up.
+	h.rune('c')
+	h.waitFor("disconnected")
+	h.rune('c')
+	h.waitFor("Servers")
+	h.key(tcell.KeyEnter)
+	h.waitFor("ou=People")
+
+	h.rune('B')
+	h.waitFor("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+
+	// ou=People was closed; the jump has to open it.
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com", "John Doe")
+	h.waitFor("[u] uid=jdoe")
+}
+
+func TestGoToDNPrompt(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('g')
+	h.waitFor("Go to DN")
+	h.typeString("uid=asmith,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyTab) // off the field, onto OK
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com", "Alice Smith")
+	h.waitFor("[u] uid=asmith")
+}
+
+func TestExportSubtreeWritesLDIF(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	out := filepath.Join(t.TempDir(), "people.ldif")
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown) // ou=People
+	h.waitFor("dn: ou=People,dc=example,dc=com")
+	h.rune('E')
+	h.waitFor("Export subtree to LDIF")
+
+	// The suggested name is derived from the RDN; replace it with our path.
+	h.screen.InjectKey(tcell.KeyCtrlU, 0, tcell.ModNone)
+	for i := 0; i < 40; i++ {
+		h.screen.InjectKey(tcell.KeyBackspace2, 0, tcell.ModNone)
+	}
+	h.typeString(out)
+	h.key(tcell.KeyTab)
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("wrote", "entries to")
+	h.waitUntil("the file to exist", func() bool {
+		_, err := os.Stat(out)
+		return err == nil
+	})
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	text := string(data)
+
+	if !strings.HasPrefix(text, "# exported by PADL") {
+		t.Errorf("export has no provenance header:\n%s", text)
+	}
+	if !strings.Contains(text, "version: 1") {
+		t.Errorf("export has no LDIF version line:\n%s", text)
+	}
+	// The subtree root and its children, but nothing from a sibling container.
+	for _, want := range []string{
+		"dn: ou=People,dc=example,dc=com",
+		"dn: uid=jdoe,ou=People,dc=example,dc=com",
+		"dn: uid=asmith,ou=People,dc=example,dc=com",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("export is missing %q:\n%s", want, text)
+		}
+	}
+	// The sibling container is not exported. Its DN does appear as a memberOf
+	// value on the exported users, which is why this checks for the record
+	// rather than the string.
+	if strings.Contains(text, "dn: cn=engineers") {
+		t.Errorf("export reached outside the selected subtree:\n%s", text)
+	}
+	if !strings.Contains(text, "memberOf: cn=engineers,ou=Groups,dc=example,dc=com") {
+		t.Errorf("attribute values pointing outside the subtree should still be written:\n%s", text)
+	}
+}
+
+// An export must never quietly overwrite something already there.
+func TestExportRefusesToOverwrite(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	out := filepath.Join(t.TempDir(), "taken.ldif")
+	if err := os.WriteFile(out, []byte("do not lose me"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: ou=People,dc=example,dc=com")
+	h.rune('E')
+	h.waitFor("Export subtree to LDIF")
+	for i := 0; i < 40; i++ {
+		h.screen.InjectKey(tcell.KeyBackspace2, 0, tcell.ModNone)
+	}
+	h.typeString(out)
+	h.key(tcell.KeyTab)
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("Export failed", "cannot write", "exists")
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "do not lose me" {
+		t.Errorf("the existing file was overwritten: %q", data)
+	}
 }

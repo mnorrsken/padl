@@ -33,8 +33,14 @@ PADL  Lab  ldaps://ldap.example.com:636  OpenLDAP
 - **Followable DNs**: press enter on a `member`, `memberOf`, `manager` — any value
   holding a DN — and the tree jumps to that entry, opening whatever is closed on
   the way.
+- **Search** with raw LDAP filters, based wherever you are standing, with a
+  scope toggle and this session's history.
+- **Paged results** (RFC 2696): big containers and big result sets load a page at
+  a time instead of stopping at a limit.
+- **Bookmarks**, **go to a DN**, **copy an entry as LDIF**, and **export a
+  subtree to an LDIF file**.
 
-Editing, search and LDIF export are the next milestones.
+Still read-only: editing is the next milestone.
 
 ## Install
 
@@ -81,6 +87,12 @@ Run `padl`, press `p` to open the server list, then `a` to add a server.
 | `a` | show or hide the hidden naming contexts |
 | `o` | show or hide operational attributes (object pane) |
 | `enter` | follow a DN to that entry in the tree, or inspect the value in full (object pane) |
+| `/` | search below the selected entry |
+| `ctrl-s` | cycle the search scope (in the filter bar) |
+| `g` | go to a DN you type in |
+| `b` / `B` | bookmark the selection / open the bookmark list |
+| `L` | copy the entry as LDIF |
+| `E` | export the entry and everything under it to a file |
 | `p` | servers |
 | `c` | connect / disconnect |
 | `esc` | cancel whatever is loading, or close a dialog |

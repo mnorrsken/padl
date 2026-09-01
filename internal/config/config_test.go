@@ -452,3 +452,67 @@ func TestDirDefaultsToThePlatformConvention(t *testing.T) {
 		t.Errorf("Dir() = %q, want %q", got, want)
 	}
 }
+
+func TestBookmarks(t *testing.T) {
+	p := NewProfile()
+	p.ID = "lab"
+	p.Host = "ldap.example.com"
+	p.BindDN = "cn=admin,dc=example,dc=com"
+
+	dn := "uid=jdoe,ou=People,dc=example,dc=com"
+	if p.Bookmarked(dn) {
+		t.Fatal("a fresh profile has no bookmarks")
+	}
+	if !p.AddBookmark(dn) {
+		t.Fatal("AddBookmark should report that it added one")
+	}
+	if !p.Bookmarked(dn) {
+		t.Error("the DN should now be bookmarked")
+	}
+
+	// Adding the same DN again, spelled differently, must not duplicate it.
+	if p.AddBookmark("UID=JDOE, OU=People,DC=Example,DC=Com") {
+		t.Error("the same DN in different case should not be added twice")
+	}
+	if len(p.Bookmarks) != 1 {
+		t.Errorf("bookmarks = %v, want one entry", p.Bookmarks)
+	}
+
+	if p.AddBookmark("   ") {
+		t.Error("an empty DN is not a bookmark")
+	}
+
+	if !p.RemoveBookmark("uid=jdoe,ou=people,dc=example,dc=com") {
+		t.Error("RemoveBookmark should match regardless of case")
+	}
+	if len(p.Bookmarks) != 0 {
+		t.Errorf("bookmarks = %v, want empty", p.Bookmarks)
+	}
+	if p.RemoveBookmark(dn) {
+		t.Error("removing one that is already gone changes nothing")
+	}
+}
+
+func TestBookmarksSurviveTheRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profiles.yaml")
+	s, _ := LoadStore(path)
+
+	p := NewProfile()
+	p.ID = "lab"
+	p.Host = "ldap.example.com"
+	p.BindDN = "cn=admin,dc=example,dc=com"
+	p.AddBookmark("ou=People,dc=example,dc=com")
+	p.AddBookmark("ou=Groups,dc=example,dc=com")
+	if err := s.Put(p); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reloaded, err := LoadStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got, _ := reloaded.Get("lab")
+	if len(got.Bookmarks) != 2 || got.Bookmarks[0] != "ou=People,dc=example,dc=com" {
+		t.Errorf("bookmarks = %v, want both in order", got.Bookmarks)
+	}
+}

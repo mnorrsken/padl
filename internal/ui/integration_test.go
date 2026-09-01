@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -287,5 +288,100 @@ func TestIntegrationLLDAPFollowDNThroughASynthesizedContainer(t *testing.T) {
 	h.waitFor("dn: uid=admin,ou=people,dc=example,dc=com")
 	if !h.rowHighlighted("[u] uid=admin", 2*time.Second) {
 		t.Errorf("the jump should reach the user through the inferred container:\n%s", h.text())
+	}
+}
+
+// ------------------------------------------------------- search and export
+
+func TestIntegrationSearchAndJump(t *testing.T) {
+	requireIT(t)
+	p := labProfile(t, config.SecurityNone, envOr("PADL_IT_LDAP_PORT", "13389"))
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitFor("ou=People", "ou=Groups")
+
+	h.rune('/')
+	h.waitFor("scope sub", "under dc=example,dc=com")
+	h.typeString("(uid=asmith)")
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("1 for (uid=asmith)", "uid=asmith,ou=People,dc=example,dc=com")
+	h.waitFor("dn: uid=asmith,ou=People,dc=example,dc=com", "Alice Smith")
+
+	h.key(tcell.KeyEnter)
+	h.waitFor("[u] uid=asmith")
+	if !h.rowHighlighted("[u] uid=asmith", 2*time.Second) {
+		t.Errorf("the chosen result should be selected in the tree:\n%s", h.text())
+	}
+}
+
+// A filter the server rejects must surface the server's own complaint.
+func TestIntegrationBadFilterIsReported(t *testing.T) {
+	requireIT(t)
+	p := labProfile(t, config.SecurityNone, envOr("PADL_IT_LDAP_PORT", "13389"))
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("(uid=")
+	h.key(tcell.KeyEnter)
+	h.waitFor("Search failed")
+}
+
+// Export against a real server, then check the file is LDIF a real tool would
+// accept: a version header, one record per entry, and the values intact.
+func TestIntegrationExportSubtree(t *testing.T) {
+	requireIT(t)
+	p := labProfile(t, config.SecurityNone, envOr("PADL_IT_LDAP_PORT", "13389"))
+	t.Setenv(config.EnvVar(p.ID), "padl-lab")
+
+	h := start(t, p, nil, config.NewSecrets())
+	h.waitFor("ou=People")
+
+	out := filepath.Join(t.TempDir(), "people.ldif")
+
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyDown) // ou=People
+	h.waitFor("dn: ou=People,dc=example,dc=com")
+	h.rune('E')
+	h.waitFor("Export subtree to LDIF")
+	for i := 0; i < 40; i++ {
+		h.screen.InjectKey(tcell.KeyBackspace2, 0, tcell.ModNone)
+	}
+	h.typeString(out)
+	h.key(tcell.KeyTab)
+	h.key(tcell.KeyEnter)
+
+	h.waitFor("wrote", "entries to")
+	h.waitUntil("the file to exist", func() bool {
+		_, err := os.Stat(out)
+		return err == nil
+	})
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"version: 1",
+		"dn: ou=People,dc=example,dc=com",
+		"dn: uid=jdoe,ou=People,dc=example,dc=com",
+		"dn: uid=asmith,ou=People,dc=example,dc=com",
+		"mail: jdoe@example.com",
+		"mail: john.doe@example.com",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("export is missing %q:\n%s", want, text)
+		}
+	}
+	// No line may exceed the fold width, or the file is not conformant.
+	for _, line := range strings.Split(text, "\n") {
+		if len(line) > 76 {
+			t.Errorf("line exceeds 76 columns: %q", line)
+		}
 	}
 }

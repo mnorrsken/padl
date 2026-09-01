@@ -28,6 +28,19 @@ func splitFingerprint(fp string) []string {
 	}
 }
 
+// centerLarge floats a primitive that wants as much room as the terminal will
+// give it, keeping a margin on every side. Used for the help, which grows with
+// the key list and would otherwise be cut off in a fixed-size box.
+func centerLarge(p tview.Primitive, maxWidth int) tview.Primitive {
+	return tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 1, 0, false).
+			AddItem(p, 0, 1, true).
+			AddItem(nil, 1, 0, false), maxWidth, 0, true).
+		AddItem(nil, 0, 1, false)
+}
+
 // center wraps a primitive in enough empty space to float it over the layout.
 func center(p tview.Primitive, width, height int) tview.Primitive {
 	return tview.NewFlex().
@@ -198,34 +211,49 @@ func valueInspector(attr string, v ldapx.Value, onClose func()) tview.Primitive 
 }
 
 const helpText = `[::b]Panes[-::-]
-  Tab / Shift-Tab   move between the tree and the object pane
-  p                 profiles
-  c                 connect / disconnect
-  ?                 this help
-  q                 quit
+  Tab / Shift-Tab   move between the left pane and the object pane
+  /                 search below the selected entry
+  g                 go to a DN you type in
+  B                 bookmarks       b   bookmark / unbookmark the selection
+  p                 profiles        c   connect / disconnect
+  ?                 this help       q   quit
+  Esc               cancel whatever is loading, or close what is open
 
 [::b]Tree[-::-]
   Up / Down, j / k  move
-  Right, l, Enter   expand (loads children on first open)
-  Left, h           collapse
+  Right, l, Enter   expand — loads children on first open
+  Left, h           collapse, or step up to the parent
+  Enter on "…"      load the next page of a large container
   r                 reload the selected node from the server
   y                 copy the selected DN
   a                 show / hide the hidden naming contexts
+  L                 copy the entry as LDIF
+  E                 export the entry and everything under it to a file
+
+[::b]Search[-::-]
+  /                 open the filter bar, based at the selected entry
+  Ctrl-S            cycle the scope: sub, base, one
+  Up / Down         walk this session's filter history
+  Enter             run it — results replace the tree on the left
+
+[::b]Results[-::-]
+  Up / Down, j / k  move; the object pane follows
+  Enter             go to that entry in the tree
+  y                 copy the selected DN
+  Esc               back to the tree
 
 [::b]Object pane[-::-]
   Up / Down, j / k  move between values
-  Enter             follow a DN to that entry in the tree, or inspect
-                    the selected value in full
+  Enter             follow a DN to that entry, or inspect the value in full
   o                 show / hide operational attributes
   y                 copy the selected value
-
-[::b]Anywhere[-::-]
-  Esc               cancel whatever is loading, or close a dialog
+  L                 copy the entry as LDIF
 
 [::b]Files[-::-]
-  Profiles and pinned certificates live in the PADL config directory.
-  Bind passwords are never written there: they go to the OS keychain,
-  come from PADL_PASSWORD_<ID>, or are typed on each connect.`
+  Profiles and pinned certificates live in the PADL config directory;
+  padl -paths prints where. Bind passwords are never written there:
+  they go to the OS keychain, come from PADL_PASSWORD_<ID>, or are
+  typed on each connect.`
 
 func helpView(onClose func()) tview.Primitive {
 	body := tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetText(helpText)
@@ -242,7 +270,84 @@ func helpView(onClose func()) tview.Primitive {
 		}
 		return ev
 	})
-	return center(body, 74, 30)
+	return centerLarge(body, 76)
+}
+
+// bookmarkList is the saved-DN picker.
+func bookmarkList(profileName string, dns []string, onChoose func(string), onDelete func(string), onClose func()) tview.Primitive {
+	list := tview.NewList().ShowSecondaryText(false)
+	list.SetBackgroundColor(colorBackground)
+	list.SetMainTextColor(colorText).
+		SetSelectedBackgroundColor(colorSelected).
+		SetSelectedTextColor(tcell.ColorWhite)
+
+	for _, dn := range dns {
+		target := dn
+		list.AddItem(tview.Escape(dn), "", 0, func() { onChoose(target) })
+	}
+	if len(dns) == 0 {
+		list.AddItem("No bookmarks yet", "", 0, nil)
+	}
+
+	list.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if ev.Key() == tcell.KeyEscape || ev.Rune() == 'q' {
+			onClose()
+			return nil
+		}
+		if ev.Rune() == 'd' {
+			i := list.GetCurrentItem()
+			if i >= 0 && i < len(dns) {
+				onDelete(dns[i])
+			}
+			return nil
+		}
+		return ev
+	})
+
+	list.SetBorder(true).
+		SetTitle(fmt.Sprintf(" Bookmarks — %s · enter go · d delete · esc close ", tview.Escape(profileName))).
+		SetTitleColor(colorTitle).
+		SetBorderColor(colorBorder).
+		SetBackgroundColor(colorBackground)
+
+	return center(list, 84, 20)
+}
+
+// promptBox asks for a single line of text.
+func promptBox(title, label, value, hint string, onSubmit func(string), onCancel func()) tview.Primitive {
+	text := value
+
+	form := tview.NewForm()
+	form.SetBackgroundColor(colorBackground)
+	form.SetFieldBackgroundColor(tcell.ColorDarkSlateGray)
+	form.SetLabelColor(colorAttrName)
+	form.AddInputField(label, value, 70, nil, func(t string) { text = t })
+	form.AddButton("OK", func() { onSubmit(text) })
+	form.AddButton("Cancel", onCancel)
+
+	info := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
+	info.SetBackgroundColor(colorBackground)
+	if hint != "" {
+		info.SetText(fmt.Sprintf("[%s]%s[-]", tag(colorDim), tview.Escape(hint)))
+	}
+
+	frame := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(form, 0, 1, true).
+		AddItem(info, 2, 0, false)
+	frame.SetBorder(true).
+		SetTitle(title).
+		SetTitleColor(colorTitle).
+		SetBorderColor(colorBorder).
+		SetBackgroundColor(colorBackground)
+	frame.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if ev.Key() == tcell.KeyEscape {
+			onCancel()
+			return nil
+		}
+		return ev
+	})
+
+	return center(frame, 84, 11)
 }
 
 // messageBox is the generic one-button dialog for errors worth stopping on.

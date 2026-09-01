@@ -35,9 +35,14 @@ type node struct {
 	// loading guards against a second fetch while one is in flight, which is
 	// easy to trigger by holding down the expand key.
 	loading bool
-	// truncated is true when the server had more children than were shown.
+	// cookie continues the listing when the server supports RFC 2696 paging.
+	// Non-empty means there is another page to fetch.
+	cookie []byte
+	// truncated is true when the server had more children and cannot be asked
+	// for them, because it does not support paging. That is a dead end, unlike
+	// a cookie.
 	truncated bool
-	// childCount is how many children were actually loaded.
+	// childCount is how many children have been loaded so far, across pages.
 	childCount int
 }
 
@@ -50,6 +55,9 @@ type tree struct {
 	// expand is called when a node needs its children; the app supplies it so
 	// the tree itself never knows about connections or contexts.
 	expand func(n *tview.TreeNode, ref *node)
+	// loadMore is called for the "load more" row under a partly-listed
+	// container.
+	loadMore func(n *tview.TreeNode, ref *node)
 	// selected is called when the highlighted row changes.
 	selected func(ref *node)
 }
@@ -120,8 +128,9 @@ func (t *tree) toggle(n *tview.TreeNode) {
 		return
 	}
 	if ref.kind == nodeMore {
-		// "N more" is informational in this milestone; paging past it arrives
-		// with the search work.
+		if t.loadMore != nil {
+			t.loadMore(n, ref)
+		}
 		return
 	}
 	if isLeaf(n, ref) {
@@ -171,36 +180,65 @@ func (t *tree) markLoading(n *tview.TreeNode) {
 	n.SetExpanded(true)
 }
 
-// setChildren replaces a node's children with fetched entries.
+// setChildren puts a page of entries under a node.
 //
-// An entry the server said nothing about is drawn as expandable; if it turns
-// out to be empty, this is where it collapses to a leaf. That is the fallback
-// for servers — eDirectory among them — that do not publish hasSubordinates.
-func (t *tree) setChildren(n *tview.TreeNode, ref *node, entries []ldapx.Entry, truncated bool) {
-	n.ClearChildren()
+// append is true when continuing a paged listing, so the rows already on screen
+// stay put and the new page lands beneath them.
+func (t *tree) setChildren(n *tview.TreeNode, ref *node, page *ldapx.Page, appendPage bool) {
+	if !appendPage {
+		n.ClearChildren()
+		ref.childCount = 0
+	} else {
+		t.dropMoreRow(n)
+	}
+
 	ref.loaded = true
 	ref.loading = false
-	ref.truncated = truncated
-	ref.childCount = len(entries)
+	ref.cookie = page.Cookie
+	ref.truncated = page.Truncated
+	ref.childCount += len(page.Entries)
 
-	for i := range entries {
-		e := entries[i]
+	for i := range page.Entries {
+		e := page.Entries[i]
 		child := &node{kind: nodeEntry, dn: e.DN, entry: &e}
 		n.AddChild(newEntryNode(child))
 	}
 
-	if truncated {
+	switch {
+	case page.More():
 		n.AddChild(newNode(
-			fmt.Sprintf("%s more than %d entries — narrow with a search", iconMore, len(entries)),
+			fmt.Sprintf("%s %d so far, enter for more", iconMore, ref.childCount),
 			colorWarn).
 			SetReference(&node{kind: nodeMore, dn: ref.dn}).
 			SetSelectable(true))
+	case page.Truncated:
+		// No cookie and no paging support: this really is as far as it goes.
+		// The row stays short because the tree pane is narrow; the status bar
+		// carries the explanation.
+		n.AddChild(newNode(
+			fmt.Sprintf("%s first %d only (no paging)", iconMore, ref.childCount),
+			colorError).
+			SetReference(&node{kind: nodePlaceholder}).
+			SetSelectable(false))
 	}
 
 	// A node that turns out to have no children just becomes a leaf. Hanging an
 	// "(empty)" row under every user and group would be noise on every screen,
 	// and the absence of children already says it.
 	n.SetExpanded(len(n.GetChildren()) > 0)
+}
+
+// dropMoreRow removes the trailing "load more" row before another page is
+// appended under it.
+func (t *tree) dropMoreRow(n *tview.TreeNode) {
+	kids := n.GetChildren()
+	for i := len(kids) - 1; i >= 0; i-- {
+		ref := refOf(kids[i])
+		if ref != nil && (ref.kind == nodeMore || ref.kind == nodePlaceholder) {
+			n.SetChildren(append(kids[:i:i], kids[i+1:]...))
+			return
+		}
+	}
 }
 
 // failLoad reverts a node after a failed expand so the user can retry it.
@@ -263,7 +301,13 @@ func (t *tree) expandCurrent() {
 		return
 	}
 	ref := refOf(n)
-	if ref == nil || ref.kind == nodePlaceholder || ref.kind == nodeMore {
+	if ref == nil || ref.kind == nodePlaceholder {
+		return
+	}
+	if ref.kind == nodeMore {
+		if t.loadMore != nil {
+			t.loadMore(n, ref)
+		}
 		return
 	}
 	if isLeaf(n, ref) {
@@ -308,6 +352,20 @@ func (t *tree) find(dn string) *tview.TreeNode {
 		}
 		if ldapx.EqualDN(ref.dn, dn) {
 			found = n
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// parentOf finds a node's parent by walking from the root, since a TreeNode
+// does not know its own.
+func (t *tree) parentOf(target *tview.TreeNode) *tview.TreeNode {
+	var found *tview.TreeNode
+	t.root.Walk(func(n, parent *tview.TreeNode) bool {
+		if n == target {
+			found = parent
 			return false
 		}
 		return true

@@ -66,6 +66,55 @@ type Profile struct {
 	BaseDN         string      `yaml:"baseDN,omitempty"`
 	TimeoutSeconds int         `yaml:"timeoutSeconds,omitempty"`
 	PageSize       int         `yaml:"pageSize,omitempty"`
+	// Bookmarks are DNs the user saved on this server, in the order they were
+	// added.
+	Bookmarks []string `yaml:"bookmarks,omitempty"`
+}
+
+// Bookmarked reports whether dn is already saved, comparing DNs rather than
+// strings so a difference in case or spacing does not produce a duplicate.
+func (p *Profile) Bookmarked(dn string) bool {
+	return indexOfDN(p.Bookmarks, dn) >= 0
+}
+
+// AddBookmark saves a DN, and reports whether anything changed.
+func (p *Profile) AddBookmark(dn string) bool {
+	dn = strings.TrimSpace(dn)
+	if dn == "" || p.Bookmarked(dn) {
+		return false
+	}
+	p.Bookmarks = append(p.Bookmarks, dn)
+	return true
+}
+
+// RemoveBookmark drops a DN, and reports whether anything changed.
+func (p *Profile) RemoveBookmark(dn string) bool {
+	i := indexOfDN(p.Bookmarks, dn)
+	if i < 0 {
+		return false
+	}
+	p.Bookmarks = append(p.Bookmarks[:i:i], p.Bookmarks[i+1:]...)
+	return true
+}
+
+// indexOfDN finds a DN in a list, ignoring case and spacing around components.
+// It deliberately does not import the LDAP layer: config stays free of it.
+func indexOfDN(list []string, dn string) int {
+	want := normalizeDN(dn)
+	for i, v := range list {
+		if normalizeDN(v) == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func normalizeDN(dn string) string {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(dn)), ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return strings.Join(parts, ",")
 }
 
 // DefaultPort is the conventional port for a transport.

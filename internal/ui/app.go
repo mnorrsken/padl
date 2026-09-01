@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mnorrsken/padl/internal/config"
 	"github.com/mnorrsken/padl/internal/ldapx"
+	"github.com/mnorrsken/padl/internal/ldif"
 )
 
 // Connector opens a connection to a directory. It is a field on App rather
@@ -50,6 +52,15 @@ type App struct {
 	object *objectPane
 	status *statusBar
 	main   *tview.Flex
+
+	// left swaps the tree for the search results without disturbing the rest of
+	// the layout.
+	left    *tview.Pages
+	results *resultsPane
+	search  *searchBar
+	// searching is true while the filter bar is open, so the global keys stand
+	// down and let it have the keyboard.
+	searching bool
 
 	// modals is the stack of open dialogs. While it is non-empty the global
 	// keys stand down so the dialog owns the keyboard.
@@ -90,6 +101,9 @@ func New(opts Options) *App {
 		tree:        newTree(),
 		object:      newObjectPane(),
 		status:      newStatusBar(),
+		left:        tview.NewPages(),
+		results:     newResultsPane(),
+		search:      newSearchBar(),
 		pending:     map[int]pendingTask{},
 	}
 	if a.screen != nil {
@@ -98,14 +112,21 @@ func New(opts Options) *App {
 
 	a.header.SetBackgroundColor(colorBackground)
 
+	a.left.AddPage("tree", a.tree, true, true)
+	a.left.AddPage("results", a.results, true, false)
+	a.left.SetBackgroundColor(colorBackground)
+
 	panes := tview.NewFlex().
-		AddItem(a.tree, 0, 2, true).
+		AddItem(a.left, 0, 2, true).
 		AddItem(a.object, 0, 5, false)
 
 	a.main = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(a.header, 1, 0, false).
 		AddItem(panes, 0, 1, true).
+		AddItem(a.search, 2, 0, false).
 		AddItem(a.status, 2, 0, false)
+	// The filter bar only takes space while it is open.
+	a.main.ResizeItem(a.search, 0, 0)
 	a.main.SetBackgroundColor(colorBackground)
 
 	a.pages.AddPage("main", a.main, true, true)
@@ -113,9 +134,17 @@ func New(opts Options) *App {
 	a.SetRoot(a.pages, true)
 
 	a.tree.expand = func(n *tview.TreeNode, ref *node) { a.expandNode(n, ref, nil) }
+	a.tree.loadMore = a.loadMoreChildren
 	a.tree.selected = a.treeSelectionChanged
 	a.object.inspect = a.inspectValue
 	a.object.follow = a.jumpToDN
+
+	a.search.run = a.runSearch
+	a.search.cancel = a.closeSearchBar
+	a.results.selected = a.loadEntry
+	a.results.chosen = a.jumpFromResults
+	a.results.more = a.loadMoreResults
+	a.results.closed = a.closeResults
 
 	a.SetInputCapture(a.globalKeys)
 	a.setDisconnected("not connected")
@@ -371,15 +400,19 @@ func (a *App) showError(title string, err error) {
 // ------------------------------------------------------------------ keys
 
 func (a *App) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
-	// A dialog owns the keyboard while it is up; global shortcuts firing
-	// underneath a modal is a classic way to lose typed input.
-	if a.modalOpen() {
+	// A dialog or the filter bar owns the keyboard while it is up; global
+	// shortcuts firing underneath one is a classic way to lose typed input.
+	if a.modalOpen() || a.searching {
 		return ev
 	}
 
 	switch ev.Key() {
 	case tcell.KeyEscape:
 		if a.cancelPending() {
+			return nil
+		}
+		if a.showingResults() {
+			a.closeResults()
 			return nil
 		}
 		return ev
@@ -397,6 +430,9 @@ func (a *App) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
 	case 'q':
 		a.Stop()
 		return nil
+	case '/':
+		a.openSearch()
+		return nil
 	case '?':
 		a.openHelp()
 		return nil
@@ -406,10 +442,19 @@ func (a *App) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
 	case 'c':
 		a.toggleConnection()
 		return nil
+	case 'B':
+		a.openBookmarks()
+		return nil
+	case 'g':
+		a.promptJumpToDN()
+		return nil
 	}
 
-	if a.GetFocus() == a.tree {
+	switch a.GetFocus() {
+	case a.tree:
 		return a.treeKeys(ev)
+	case a.results:
+		return a.resultsKeys(ev)
 	}
 	return a.objectKeys(ev)
 }
@@ -449,6 +494,26 @@ func (a *App) treeKeys(ev *tcell.EventKey) *tcell.EventKey {
 	case 'a':
 		a.toggleShowAllContexts()
 		return nil
+	case 'b':
+		a.toggleBookmark()
+		return nil
+	case 'L':
+		a.copyEntryAsLDIF()
+		return nil
+	case 'E':
+		a.exportSubtree()
+		return nil
+	}
+	return ev
+}
+
+func (a *App) resultsKeys(ev *tcell.EventKey) *tcell.EventKey {
+	if ev.Rune() == 'y' {
+		i := a.results.GetCurrentItem()
+		if i >= 0 && i < len(a.results.entries) {
+			a.copyToClipboard("DN", a.results.entries[i].DN)
+		}
+		return nil
 	}
 	return ev
 }
@@ -467,30 +532,45 @@ func (a *App) objectKeys(ev *tcell.EventKey) *tcell.EventKey {
 			a.copyToClipboard(r.attr, r.value.Text)
 		}
 		return nil
+	case 'L':
+		a.copyEntryAsLDIF()
+		return nil
 	}
 	return ev
 }
 
 func (a *App) focusNext() {
-	if a.GetFocus() == a.tree {
+	left := a.leftPrimitive()
+	if a.GetFocus() == left {
 		a.SetFocus(a.object.table)
 	} else {
-		a.SetFocus(a.tree)
+		a.SetFocus(left)
 	}
 	a.refreshHints()
 }
 
+// leftPrimitive is whichever of the tree or the results list is showing.
+func (a *App) leftPrimitive() tview.Primitive {
+	if a.showingResults() {
+		return a.results
+	}
+	return a.tree
+}
+
 func (a *App) refreshHints() {
-	common := "tab pane · p servers · c connect · ? help · q quit"
-	if a.modalOpen() {
+	common := "tab pane · / search · g goto · B bookmarks · p servers · ? help · q quit"
+	switch {
+	case a.modalOpen():
 		a.status.setKeys("esc close dialog")
-		return
+	case a.searching:
+		a.status.setKeys("[search] ctrl-s scope · ↑↓ history · enter run · esc cancel")
+	case a.GetFocus() == a.results:
+		a.status.setKeys("[results] enter go to it in the tree · y copy dn · esc back · " + common)
+	case a.GetFocus() == a.tree:
+		a.status.setKeys("[tree] enter expand · r reload · y copy dn · b bookmark · L ldif · E export · " + common)
+	default:
+		a.status.setKeys("[object] enter inspect · o operational · y copy value · " + common)
 	}
-	if a.GetFocus() == a.tree {
-		a.status.setKeys("[tree] enter expand · r reload · y copy dn · a all contexts · " + common)
-		return
-	}
-	a.status.setKeys("[object] enter inspect · o operational · y copy value · " + common)
 }
 
 // copyToClipboard uses the terminal's own OSC 52 clipboard, which is the only
@@ -650,6 +730,7 @@ func (a *App) adopt(p config.Profile, dir ldapx.Directory, password string, save
 		a.root = nil
 	}
 
+	a.left.SwitchToPage("tree")
 	a.loadBases()
 	a.renderHeader()
 	a.refreshHints()
@@ -695,6 +776,7 @@ func (a *App) loadBases() {
 func (a *App) setDisconnected(reason string) {
 	a.vendor = ldapx.VendorGeneric
 	a.root = nil
+	a.left.SwitchToPage("tree")
 	a.tree.clear("Directory")
 	a.object.setBases(nil)
 	a.object.clear(reason)
@@ -724,33 +806,65 @@ func (a *App) toggleShowAllContexts() {
 		return
 	}
 	a.showAll = !a.showAll
+	a.left.SwitchToPage("tree")
 	a.loadBases()
 	a.renderHeader()
 }
 
 // ---------------------------------------------------------------- tree logic
 
-// expandNode fetches a node's children. then, if given, runs once they are in
-// place — which is how the jump-to-DN walk steps down one level at a time.
+// expandNode fetches a node's first page of children. then, if given, runs once
+// they are in place — which is how the jump-to-DN walk steps down one level at
+// a time.
 func (a *App) expandNode(n *tview.TreeNode, ref *node, then func()) {
+	a.fetchChildren(n, ref, ldapx.PageRequest{Size: a.profile.Limit()}, false, then)
+}
+
+// loadMoreChildren continues a paged listing from the "load more" row. n is
+// that row; its parent is the container being listed.
+func (a *App) loadMoreChildren(more *tview.TreeNode, ref *node) {
+	parent := a.tree.parentOf(more)
+	if parent == nil {
+		return
+	}
+	parentRef := refOf(parent)
+	if parentRef == nil || parentRef.loading || len(parentRef.cookie) == 0 {
+		return
+	}
+	a.fetchChildren(parent, parentRef,
+		ldapx.PageRequest{Size: a.profile.Limit(), Cookie: parentRef.cookie}, true, nil)
+}
+
+// fetchChildren loads one page of a container's children.
+func (a *App) fetchChildren(n *tview.TreeNode, ref *node, req ldapx.PageRequest, appendPage bool, then func()) {
 	if a.dir == nil {
 		a.status.warn("not connected")
 		return
 	}
 	ref.loading = true
-	a.tree.markLoading(n)
+	if !appendPage {
+		a.tree.markLoading(n)
+	}
 
 	dn := ref.dn
-	limit := a.profile.Limit()
 	a.task(groupNone, fmt.Sprintf("listing %s…", dn), func(ctx context.Context) (func(), error) {
-		entries, truncated, err := a.dir.Children(ctx, dn, limit)
+		page, err := a.dir.Children(ctx, dn, req)
 		if err != nil {
-			return func() { a.tree.failLoad(n, ref) }, err
+			return func() {
+				ref.loading = false
+				if !appendPage {
+					a.tree.failLoad(n, ref)
+				}
+			}, err
 		}
 		return func() {
-			a.tree.setChildren(n, ref, entries, truncated)
-			if truncated {
-				a.status.warn("%s has more than %d children — only the first %d are shown", dn, limit, limit)
+			a.tree.setChildren(n, ref, page, appendPage)
+			switch {
+			case page.Truncated:
+				a.status.warn("%s: showing the first %d children; this server has no paged results, so raise the profile's child limit to see more",
+					dn, ref.childCount)
+			case page.More():
+				a.status.info("%s: %d children so far, more available", dn, ref.childCount)
 			}
 			if then != nil {
 				then()
@@ -984,11 +1098,352 @@ func (a *App) reportJumpMiss(path []string, i int) {
 	}
 	parent := path[i-1]
 	if p := a.tree.find(parent); p != nil {
-		if ref := refOf(p); ref != nil && ref.truncated {
-			a.status.errorf("%s was not among the first %d children of %s — raise the profile's child limit",
-				missing, ref.childCount, parent)
-			return
+		if ref := refOf(p); ref != nil {
+			switch {
+			case len(ref.cookie) > 0:
+				a.status.errorf("%s is not in the %d children of %s loaded so far — load more and try again",
+					missing, ref.childCount, parent)
+				return
+			case ref.truncated:
+				a.status.errorf("%s was not among the first %d children of %s — raise the profile's child limit",
+					missing, ref.childCount, parent)
+				return
+			}
 		}
 	}
 	a.status.errorf("%s does not exist under %s", missing, parent)
+}
+
+// -------------------------------------------------------------------- search
+
+// openSearch drops the filter bar in, primed to search under whatever the tree
+// has selected. Searching from where you are standing is nearly always what is
+// wanted; the base is shown so it is never a guess.
+func (a *App) openSearch() {
+	if a.dir == nil {
+		a.status.warn("not connected")
+		return
+	}
+	base := a.searchBase()
+	if base == "" {
+		a.status.warn("nothing selected to search under")
+		return
+	}
+	a.searching = true
+	a.search.open(base)
+	a.main.ResizeItem(a.search, 2, 0)
+	a.SetFocus(a.search.input)
+	a.status.setKeys("[search] ctrl-s scope · ↑↓ history · enter run · esc cancel")
+}
+
+// searchBase is the DN a new search starts from: the selected entry, or the
+// naming context it sits under when the cursor is on a results row.
+func (a *App) searchBase() string {
+	if dn := a.tree.currentDN(); dn != "" {
+		return dn
+	}
+	if bases := a.tree.bases(); len(bases) > 0 {
+		return bases[0]
+	}
+	return ""
+}
+
+func (a *App) closeSearchBar() {
+	a.searching = false
+	a.main.ResizeItem(a.search, 0, 0)
+	if a.showingResults() {
+		a.SetFocus(a.results)
+	} else {
+		a.SetFocus(a.tree)
+	}
+	a.refreshHints()
+}
+
+func (a *App) showingResults() bool {
+	name, _ := a.left.GetFrontPage()
+	return name == "results"
+}
+
+func (a *App) runSearch(q ldapx.Query) {
+	a.closeSearchBar()
+	a.fetchResults(q, ldapx.PageRequest{Size: a.profile.Limit()}, false)
+}
+
+func (a *App) loadMoreResults() {
+	if !a.results.hasMore() {
+		return
+	}
+	a.results.loading = true
+	a.fetchResults(a.results.query,
+		ldapx.PageRequest{Size: a.profile.Limit(), Cookie: a.results.cookie}, true)
+}
+
+func (a *App) fetchResults(q ldapx.Query, req ldapx.PageRequest, appendPage bool) {
+	if a.dir == nil {
+		return
+	}
+	a.task(groupNone, fmt.Sprintf("searching %s…", q.Filter), func(ctx context.Context) (func(), error) {
+		page, err := a.dir.Search(ctx, q, req)
+		if err != nil {
+			// A rejected filter is the common case and the user has to see it
+			// in full, so it gets a dialog as well as the status line.
+			failed := err
+			return func() {
+				a.results.loading = false
+				a.showError(" Search failed ", failed)
+			}, err
+		}
+		return func() {
+			a.results.show(q, page, appendPage)
+			a.left.SwitchToPage("results")
+			a.SetFocus(a.results)
+			a.refreshHints()
+			switch {
+			case len(a.results.entries) == 0:
+				a.status.warn("%s matched nothing under %s", q.Filter, q.BaseDN)
+			case page.Truncated:
+				a.status.warn("%d matches shown; this server has no paged results, so raise the profile's child limit to see more",
+					len(a.results.entries))
+			case page.More():
+				a.status.info("%d matches so far, more available", len(a.results.entries))
+			default:
+				a.status.ok("%d matches", len(a.results.entries))
+			}
+		}, nil
+	})
+}
+
+// jumpFromResults takes the chosen hit back into the tree, which is where the
+// entry's surroundings are.
+func (a *App) jumpFromResults(dn string) {
+	a.closeResults()
+	a.jumpToDN(dn)
+}
+
+func (a *App) closeResults() {
+	a.left.SwitchToPage("tree")
+	a.SetFocus(a.tree)
+	a.refreshHints()
+	// Put the object pane back on whatever the tree is pointing at, rather than
+	// leaving it showing a result that is no longer selected anywhere.
+	a.loadEntry(a.tree.currentDN())
+}
+
+// promptJumpToDN asks for a DN and goes there, for the case where you have one
+// on the clipboard rather than on screen.
+func (a *App) promptJumpToDN() {
+	if a.dir == nil {
+		a.status.warn("not connected")
+		return
+	}
+	name := ""
+	name = a.openModal(promptBox(" Go to DN ", "DN", "",
+		"Expands whatever is closed on the way.",
+		func(dn string) {
+			a.closeModal(name)
+			if dn = strings.TrimSpace(dn); dn != "" {
+				a.jumpToDN(dn)
+			}
+		},
+		func() { a.closeModal(name) },
+	))
+}
+
+// ----------------------------------------------------------------- bookmarks
+
+// toggleBookmark saves or unsaves the selected DN on the current profile.
+func (a *App) toggleBookmark() {
+	dn := a.tree.currentDN()
+	if a.dir == nil || dn == "" {
+		return
+	}
+	p := a.profile
+	added := p.AddBookmark(dn)
+	if !added {
+		p.RemoveBookmark(dn)
+	}
+	if err := a.opts.Profiles.Put(p); err != nil {
+		a.showError("Save bookmark", err)
+		return
+	}
+	a.profile = p
+	if added {
+		a.status.ok("bookmarked %s", dn)
+		return
+	}
+	a.status.info("removed the bookmark for %s", dn)
+}
+
+func (a *App) openBookmarks() {
+	if a.dir == nil {
+		a.status.warn("not connected")
+		return
+	}
+	name := ""
+	name = a.openModal(bookmarkList(a.profile.Display(), a.profile.Bookmarks,
+		func(dn string) {
+			a.closeModal(name)
+			a.jumpToDN(dn)
+		},
+		func(dn string) {
+			p := a.profile
+			if !p.RemoveBookmark(dn) {
+				return
+			}
+			if err := a.opts.Profiles.Put(p); err != nil {
+				a.showError("Save bookmark", err)
+				return
+			}
+			a.profile = p
+			a.closeModal(name)
+			a.openBookmarks()
+			a.status.info("removed the bookmark for %s", dn)
+		},
+		func() { a.closeModal(name) },
+	))
+}
+
+// --------------------------------------------------------------------- LDIF
+
+// copyEntryAsLDIF puts the entry under the cursor on the clipboard as LDIF.
+func (a *App) copyEntryAsLDIF() {
+	if e := a.object.entry; e != nil {
+		a.copyToClipboard("entry as LDIF", ldif.String(e))
+		return
+	}
+	a.status.warn("no entry loaded")
+}
+
+// exportSubtree writes the selected entry and everything beneath it to a file.
+//
+// It walks the subtree itself rather than asking for one giant result, so a
+// server without paging still exports fully, and so progress can be reported.
+func (a *App) exportSubtree() {
+	dn := a.tree.currentDN()
+	if a.dir == nil || dn == "" {
+		a.status.warn("select an entry to export")
+		return
+	}
+
+	name := ""
+	name = a.openModal(promptBox(" Export subtree to LDIF ", "File", defaultExportPath(dn),
+		fmt.Sprintf("Writes %s and everything beneath it. An existing file is not overwritten.", dn),
+		func(path string) {
+			a.closeModal(name)
+			a.runExport(dn, strings.TrimSpace(path))
+		},
+		func() { a.closeModal(name) },
+	))
+}
+
+// defaultExportPath suggests a filename from the RDN, so the common case is one
+// keypress.
+func defaultExportPath(dn string) string {
+	rdn := ldapx.RDN(dn)
+	if i := strings.Index(rdn, "="); i >= 0 {
+		rdn = rdn[i+1:]
+	}
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, rdn)
+	if safe == "" {
+		safe = "export"
+	}
+	return safe + ".ldif"
+}
+
+func (a *App) runExport(dn, path string) {
+	if path == "" {
+		a.status.warn("no file name given")
+		return
+	}
+	profile := a.profile
+	limit := a.profile.Limit()
+
+	fail := func(err error) (func(), error) {
+		// A path that already exists or cannot be written is worth stopping on,
+		// and the message is usually too long for the one-line status bar.
+		return func() { a.showError(" Export failed ", err) }, err
+	}
+
+	a.task(groupNone, fmt.Sprintf("exporting %s…", dn), func(ctx context.Context) (func(), error) {
+		entries, err := collectSubtree(ctx, a.dir, dn, limit)
+		if err != nil {
+			return fail(err)
+		}
+
+		// Exclusive create: an export must never quietly eat an existing file.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return fail(fmt.Errorf("cannot write %s: %w", path, err))
+		}
+		defer f.Close()
+
+		header := ldif.Comment("exported by PADL from %s\n%s\n%d entries",
+			profile.URL(), dn, len(entries))
+		if _, err := f.WriteString(header + "\n"); err != nil {
+			return fail(fmt.Errorf("write %s: %w", path, err))
+		}
+		if err := ldif.WriteEntries(f, entries); err != nil {
+			return fail(fmt.Errorf("write %s: %w", path, err))
+		}
+
+		n := len(entries)
+		return func() { a.status.ok("wrote %d entries to %s", n, path) }, nil
+	})
+}
+
+// collectSubtree reads an entry and everything beneath it, following pages.
+//
+// A subtree search would be one round trip, but it returns only the attributes
+// the server feels like giving for each entry; walking level by level and
+// reading each entry in full is what makes the export usable as input.
+func collectSubtree(ctx context.Context, dir ldapx.Directory, root string, pageSize int) ([]ldapx.Entry, error) {
+	var (
+		out     []ldapx.Entry
+		queue   = []string{root}
+		visited = map[string]bool{}
+	)
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		dn := queue[0]
+		queue = queue[1:]
+		key := strings.ToLower(dn)
+		if visited[key] {
+			continue
+		}
+		visited[key] = true
+
+		e, err := dir.Entry(ctx, dn, false)
+		if err != nil {
+			// A subtree can contain an entry the bind cannot read. Skipping it
+			// is better than failing the whole export, but it must not be
+			// silent — the count in the header is the honest record.
+			continue
+		}
+		out = append(out, *e)
+
+		req := ldapx.PageRequest{Size: pageSize}
+		for {
+			page, err := dir.Children(ctx, dn, req)
+			if err != nil {
+				return nil, err
+			}
+			for _, child := range page.Entries {
+				queue = append(queue, child.DN)
+			}
+			if !page.More() {
+				break
+			}
+			req = page.Next(pageSize)
+		}
+	}
+	return out, nil
 }
