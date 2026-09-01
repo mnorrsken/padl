@@ -89,3 +89,100 @@ jobs:
         with:
           name: padl-binaries
           path: dist/
+
+  msi:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build padl.exe
+        run: go build -trimpath -ldflags "-s -w" -o padl.exe ./cmd/padl
+
+      - name: Install WiX
+        run: dotnet tool install --global wix --version 6.0.2
+
+      - name: Build the MSI
+        run: ./packaging/windows/build-msi.ps1 -Version 0.0.0 -Arch x64 -ExePath padl.exe -OutDir dist
+
+      # The installer exists to give people on managed laptops something they
+      # can install without an administrator, so assert that it is per-user
+      # rather than trusting the WiX Scope attribute to have done its job.
+      - name: Check it is a per-user package
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember(
+            'OpenDatabase', 'InvokeMethod', $null, $installer, @($msi, 0))
+          $view = $db.GetType().InvokeMember(
+            'OpenView', 'InvokeMethod', $null, $db,
+            @("SELECT Property, Value FROM Property"))
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+          $props = @{}
+          while ($true) {
+            $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+            if ($null -eq $rec) { break }
+            $name = $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 1)
+            $val  = $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 2)
+            $props[$name] = $val
+          }
+          $props.GetEnumerator() | Sort-Object Name | ForEach-Object { "  $($_.Name) = $($_.Value)" }
+          if ($props['ALLUSERS'] -eq '1') {
+            throw "ALLUSERS=1: this is a per-machine package and would demand elevation"
+          }
+
+      - name: Install it and run it
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          $p = Start-Process msiexec -PassThru -Wait -NoNewWindow -ArgumentList @(
+            '/i', "`"$msi`"", '/quiet', '/norestart', '/l*v', 'install.log')
+          if ($p.ExitCode -ne 0) {
+            Get-Content install.log -Tail 60
+            throw "msiexec failed with $($p.ExitCode)"
+          }
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\PADL\padl.exe'
+          if (-not (Test-Path $exe)) {
+            Get-Content install.log -Tail 60
+            throw "nothing landed at $exe"
+          }
+          # Nothing may have been written to a shared location.
+          $shared = Join-Path $env:ProgramFiles 'PADL'
+          if (Test-Path $shared) { throw "a per-user install wrote to $shared" }
+          & $exe -version
+          & $exe -paths
+
+      - name: Check the user PATH picked it up
+        shell: pwsh
+        run: |
+          $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+          $want = Join-Path $env:LOCALAPPDATA 'Programs\PADL'
+          if ($userPath -notlike "*$want*") {
+            throw "user PATH does not contain $want; it is: $userPath"
+          }
+          $machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+          if ($machinePath -like "*PADL*") {
+            throw "a per-user install must not touch the machine PATH"
+          }
+
+      - name: Uninstall cleanly
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          $p = Start-Process msiexec -PassThru -Wait -NoNewWindow -ArgumentList @(
+            '/x', "`"$msi`"", '/quiet', '/norestart', '/l*v', 'uninstall.log')
+          if ($p.ExitCode -ne 0) {
+            Get-Content uninstall.log -Tail 60
+            throw "uninstall failed with $($p.ExitCode)"
+          }
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\PADL\padl.exe'
+          if (Test-Path $exe) { throw "uninstall left $exe behind" }
+          $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+          if ($userPath -like "*Programs\PADL*") {
+            throw "uninstall left the PATH entry behind: $userPath"
+          }

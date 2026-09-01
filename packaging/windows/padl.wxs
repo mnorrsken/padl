@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PADL's Windows installer.
+
+  Deliberately a PER-USER install into %LocalAppData%\Programs\PADL, not a
+  per-machine one into Program Files. Writing to Program Files needs
+  administrator rights, and the whole point of shipping this is to give people
+  on managed laptops something they can install without one. Nothing here
+  touches HKLM or any shared location.
+
+  UpgradeCode must never change across releases — it is what lets a new version
+  replace an old one instead of installing beside it.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="PADL"
+      Manufacturer="Martin Norrsken"
+      Version="$(var.Version)"
+      UpgradeCode="8D3E7BE3-4229-426D-8A69-72814804EE92"
+      Scope="perUser"
+      Compressed="yes"
+      InstallerVersion="500">
+
+    <SummaryInformation Description="PADL — a terminal LDAP browser" />
+
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of PADL is already installed. Uninstall it first." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Shown in Settings > Installed apps. Worth filling in: on a managed
+         machine this is what an administrator reads when deciding whether to
+         allow the thing. -->
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/mnorrsken/padl" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/mnorrsken/padl/issues" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="PADL" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="PadlExecutable">
+        <File Id="PadlExe" Name="padl.exe" Source="$(var.ExePath)" KeyPath="yes" />
+        <!-- Per-user PATH only (System="no"), so this needs no elevation and
+             cannot affect anyone else on the machine. -->
+        <Environment
+            Id="PadlPath"
+            Name="PATH"
+            Value="[INSTALLFOLDER]"
+            Part="last"
+            Action="set"
+            System="no"
+            Permanent="no" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="PADL" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+</Wix>
