@@ -1,13 +1,37 @@
 package main_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+// runPadl runs the binary with a deadline, so a build that starts successfully
+// when the test expected it to fail cannot sit there until the whole package
+// times out.
+func runPadl(t *testing.T, padl string, env []string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, padl, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdin = strings.NewReader("")
+	var out, errOut strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("padl %v did not exit within 30s; it should have failed immediately", args)
+	}
+	return out.String(), errOut.String(), err
+}
 
 // build compiles padl once for the tests below.
 func build(t *testing.T) string {
@@ -30,19 +54,19 @@ func build(t *testing.T) string {
 //
 // It used to panic with "close of nil channel" instead: main opened the screen
 // and handed it to tview.SetScreen, which discards the Init error, so the
-// failure only surfaced as a crash on shutdown. TERM=dumb is a terminal that
-// exists but cannot be addressed, which fails the same way whether or not a
-// tty is attached.
+// failure only surfaced as a crash on shutdown.
+//
+// Unix only. TERM=dumb is a terminal that exists but cannot be addressed, and
+// tcell refuses it — but on Windows tcell talks to the console API and ignores
+// TERM entirely, so there is no equivalent broken terminal to point it at. The
+// regression this guards is a terminfo/tty one, which is where it is tested.
 func TestUndrivableTerminalFailsWithAMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tcell uses the Windows console API and ignores TERM; no undrivable terminal to test with")
+	}
 	padl := build(t)
 
-	cmd := exec.Command(padl)
-	cmd.Env = append(os.Environ(), "TERM=dumb")
-	cmd.Stdin = strings.NewReader("")
-	stderr := &strings.Builder{}
-	cmd.Stderr = stderr
-
-	err := cmd.Run()
+	_, stderr, err := runPadl(t, padl, []string{"TERM=dumb"})
 	if err == nil {
 		t.Fatalf("expected a non-zero exit, got success; stderr: %s", stderr)
 	}
@@ -54,13 +78,12 @@ func TestUndrivableTerminalFailsWithAMessage(t *testing.T) {
 		t.Errorf("exit code = %d, want 1", code)
 	}
 
-	got := stderr.String()
-	if !strings.Contains(got, "open terminal") {
-		t.Errorf("stderr should say the terminal could not be opened, got: %q", got)
+	if !strings.Contains(stderr, "open terminal") {
+		t.Errorf("stderr should say the terminal could not be opened, got: %q", stderr)
 	}
 	for _, crash := range []string{"panic:", "goroutine", "nil channel"} {
-		if strings.Contains(got, crash) {
-			t.Errorf("this should be a message, not a crash; stderr contains %q:\n%s", crash, got)
+		if strings.Contains(stderr, crash) {
+			t.Errorf("this should be a message, not a crash; stderr contains %q:\n%s", crash, stderr)
 		}
 	}
 }
@@ -70,15 +93,12 @@ func TestVersionAndPathsNeedNoTerminal(t *testing.T) {
 	padl := build(t)
 
 	for _, flag := range []string{"-version", "-paths"} {
-		cmd := exec.Command(padl, flag)
-		cmd.Env = append(os.Environ(), "TERM=dumb")
-		cmd.Stdin = strings.NewReader("")
-		out, err := cmd.Output()
+		out, stderr, err := runPadl(t, padl, []string{"TERM=dumb"}, flag)
 		if err != nil {
-			t.Errorf("%s: %v", flag, err)
+			t.Errorf("%s: %v (stderr: %s)", flag, err, stderr)
 			continue
 		}
-		if len(strings.TrimSpace(string(out))) == 0 {
+		if len(strings.TrimSpace(out)) == 0 {
 			t.Errorf("%s printed nothing", flag)
 		}
 	}
