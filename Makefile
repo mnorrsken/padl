@@ -56,11 +56,12 @@ lab-logs: ## Follow the lab directories' logs
 
 dist: ## Cross-compile release binaries into ./dist
 	@mkdir -p dist
-	@for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
-		os=$${target%/*}; arch=$${target#*/}; \
+	@for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64 windows/arm64; do \
+		os=$${target%/*}; arch=$${target#*/}; ext=""; \
+		[ "$$os" = "windows" ] && ext=".exe"; \
 		echo "building $$os/$$arch"; \
-		GOOS=$$os GOARCH=$$arch go build -ldflags '$(LDFLAGS)' \
-			-o dist/$(BINARY)-$$os-$$arch ./cmd/$(BINARY) || exit 1; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags '$(LDFLAGS)' \
+			-o dist/$(BINARY)-$$os-$$arch$$ext ./cmd/$(BINARY) || exit 1; \
 	done
 
 clean: ## Remove build output

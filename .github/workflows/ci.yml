@@ -10,7 +10,12 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -19,6 +24,7 @@ jobs:
           cache: true
 
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: |
           unformatted=$(gofmt -l cmd internal)
           if [ -n "$unformatted" ]; then
@@ -27,10 +33,20 @@ jobs:
 
       - run: go vet ./...
 
+      # The race detector needs a C toolchain on Windows; the Linux job is the
+      # one that has to catch data races anyway.
       - name: Unit tests
+        if: runner.os != 'Windows'
         run: go test -race ./...
 
+      - name: Unit tests (Windows)
+        if: runner.os == 'Windows'
+        run: go test ./...
+
+      # The lab directories are Linux containers, so the integration tests only
+      # run there.
       - name: Start the lab directories
+        if: runner.os == 'Linux'
         run: |
           docker compose -f dev/docker-compose.yml up -d
           for c in padl-lab-openldap padl-lab-lldap; do
@@ -48,12 +64,13 @@ jobs:
           done
 
       - name: Integration tests
+        if: runner.os == 'Linux'
         env:
           PADL_IT: '1'
         run: go test -count=1 ./...
 
       - name: Lab logs on failure
-        if: failure()
+        if: failure() && runner.os == 'Linux'
         run: |
           docker logs padl-lab-openldap || true
           docker logs padl-lab-lldap || true

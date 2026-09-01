@@ -42,6 +42,10 @@ Editing, search and LDIF export are the next milestones.
 go install github.com/mnorrsken/padl/cmd/padl@latest
 ```
 
+Or download a binary for your platform from the
+[releases page](https://github.com/mnorrsken/padl/releases) — linux, macOS and
+Windows, on amd64 and arm64.
+
 Or from a checkout:
 
 ```sh
@@ -80,7 +84,8 @@ Run `padl`, press `p` to open the server list, then `a` to add a server.
 | `?` / `q` | help / quit |
 
 Copying uses the terminal's OSC 52 clipboard, so it also works over ssh — in
-terminals that support it.
+terminals that support it. On Windows use Windows Terminal; the legacy console
+host does not support OSC 52.
 
 ## Certificates
 
@@ -98,12 +103,14 @@ louder prompt naming both fingerprints. Nothing is trusted silently, and the
 ## Files
 
 ```
-$XDG_CONFIG_HOME/padl/          # or ~/.config/padl
-  profiles.yaml                 # servers (0600)
-  trust.yaml                    # pinned certificates (0600)
+$XDG_CONFIG_HOME/padl/          # or ~/.config/padl, or %AppData%\padl on Windows
+  profiles.yaml                 # servers (0600 on Unix)
+  trust.yaml                    # pinned certificates (0600 on Unix)
 ```
 
-`padl -paths` prints them. Bind passwords are never written to either file:
+`padl -paths` prints them. On Windows the mode bits do nothing — access is
+governed by the ACL the files inherit from `%AppData%`, which is already
+restricted to your account. Bind passwords are never written to either file:
 they go to the OS keychain (service `padl`, key = profile ID), come from
 `PADL_PASSWORD_<ID>`, or are typed on each connect.
 

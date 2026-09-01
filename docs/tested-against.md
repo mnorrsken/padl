@@ -59,6 +59,31 @@ Against lldap:
 - the root reporting an unreadable entry instead of showing the wrong one
 - the wrong-bind-DN dialog carrying the server's own explanation
 
+## Platforms
+
+| Platform | Built | Tests run | Notes |
+| --- | --- | --- | --- |
+| macOS (arm64) | yes | full suite, plus integration against the lab | The development machine. |
+| Linux (amd64) | yes | full suite in CI, including integration | CI runs on ubuntu-latest. |
+| Windows | yes | unit tests only, on `windows-latest` in CI | No lab containers there, so nothing exercises a live server on Windows. Nobody has run the TUI on Windows by hand — see below. |
+
+### What is unproven on Windows
+
+The unit tests cover the config store, the LDAP layer and the whole UI against a
+simulated terminal, and those run on a real Windows runner. What that does *not*
+prove:
+
+- **Rendering in a real console.** Use Windows Terminal. The legacy console host
+  has no OSC 52, so `y` will not reach the clipboard, and box drawing there is
+  historically unreliable.
+- **The credential store.** `go-keyring` uses wincred, and it maps a missing
+  credential to `ErrNotFound`, which is what PADL's fall-back-to-prompt path
+  checks — but the tests use a fake keychain, so no test touches the real
+  Credential Manager. A credential blob is capped at 2560 bytes there.
+- **File protection.** `Chmod(0600)` only moves the read-only flag on Windows.
+  `profiles.yaml` and `trust.yaml` are protected by the ACL they inherit from
+  `%AppData%`, not by anything PADL does.
+
 ## Adding a row
 
 When you point PADL at a new server, note the version, what worked, and anything

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -184,13 +185,20 @@ func ProfilesPath() string { return filepath.Join(Dir(), "profiles.yaml") }
 
 // Dir is PADL's config directory.
 //
-// $XDG_CONFIG_HOME when set, otherwise ~/.config — including on macOS, where
-// os.UserConfigDir would point at ~/Library/Application Support. A terminal tool
-// whose config sits next to everything else in ~/.config is the one people can
-// actually find and put in a dotfiles repo.
+// $XDG_CONFIG_HOME wins everywhere, so a dotfiles setup keeps working under
+// WSL, Git Bash and the like. Otherwise: %AppData%\padl on Windows, which is
+// where Windows users look, and ~/.config/padl everywhere else — including
+// macOS, where os.UserConfigDir would point at ~/Library/Application Support. A
+// terminal tool whose config sits next to everything else in ~/.config is the
+// one people can actually find and commit to a dotfiles repo.
 func Dir() string {
 	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
 		return filepath.Join(dir, "padl")
+	}
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(dir, "padl")
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -306,6 +314,11 @@ func (s *Store) Save() error {
 
 // writeFilePrivate writes data to path with mode 0600, creating the parent
 // directory as 0700 if needed.
+//
+// On Windows those bits are close to decorative — Go's Chmod only moves the
+// read-only flag there, and access is really governed by the ACL the file
+// inherits from %AppData%, which is already restricted to the user. So the file
+// is not world-readable on Windows either, just not because of this call.
 func writeFilePrivate(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

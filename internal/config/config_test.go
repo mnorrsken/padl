@@ -7,12 +7,54 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zalando/go-keyring"
 )
+
+// requirePrivate asserts that a file PADL wrote is not readable by others.
+//
+// Only meaningful on Unix: Go's Chmod on Windows moves the read-only flag and
+// nothing else, so the mode bits there say nothing about who can read the file
+// — that is settled by the ACL inherited from %AppData%. Asserting 0600 on
+// Windows would be testing a fiction, so the check is that the file exists and
+// is a regular file.
+func requirePrivate(t *testing.T, path, what string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", what, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("%s is not a regular file", what)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("%s mode = %o, want 600", what, mode)
+	}
+}
+
+func requirePrivateDir(t *testing.T, dir string) {
+	t.Helper()
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat %s: %v", dir, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Errorf("config dir mode = %o, want 700", mode)
+	}
+}
 
 func TestStoreRoundTripAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "profiles.yaml")
@@ -34,18 +76,8 @@ func TestStoreRoundTripAndPermissions(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("profiles.yaml mode = %o, want 600 — it names bind DNs and hosts", mode)
-	}
-	if dirInfo, err := os.Stat(filepath.Dir(path)); err == nil {
-		if mode := dirInfo.Mode().Perm(); mode != 0o700 {
-			t.Errorf("config dir mode = %o, want 700", mode)
-		}
-	}
+	requirePrivate(t, path, "profiles.yaml — it names bind DNs and hosts")
+	requirePrivateDir(t, filepath.Dir(path))
 
 	// The password must never reach the file, whatever else does.
 	data, err := os.ReadFile(path)
@@ -210,13 +242,7 @@ func TestTrustStoreRoundTrip(t *testing.T) {
 		t.Fatalf("Set: %v", err)
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("trust.yaml mode = %o, want 600", mode)
-	}
+	requirePrivate(t, path, "trust.yaml")
 
 	reloaded, err := LoadTrustStore(path)
 	if err != nil {
@@ -374,5 +400,55 @@ func TestEnvVar(t *testing.T) {
 		if got := EnvVar(id); got != want {
 			t.Errorf("EnvVar(%q) = %q, want %q", id, got, want)
 		}
+	}
+}
+
+func TestDirHonoursXDGEverywhere(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join("custom", "cfg"))
+	want := filepath.Join("custom", "cfg", "padl")
+	if got := Dir(); got != want {
+		t.Errorf("Dir() = %q, want %q — XDG_CONFIG_HOME wins on every platform so a "+
+			"dotfiles setup keeps working under WSL and Git Bash", got, want)
+	}
+	if got := ProfilesPath(); got != filepath.Join(want, "profiles.yaml") {
+		t.Errorf("ProfilesPath() = %q", got)
+	}
+	if got := TrustPath(); got != filepath.Join(want, "trust.yaml") {
+		t.Errorf("TrustPath() = %q", got)
+	}
+}
+
+// Without XDG_CONFIG_HOME the location is per-platform: %AppData% on Windows,
+// ~/.config elsewhere. os.UserConfigDir is only right on Windows — on macOS it
+// points at ~/Library/Application Support, which is not where anyone looks for
+// a terminal tool's config.
+func TestDirDefaultsToThePlatformConvention(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	got := Dir()
+	if !filepath.IsAbs(got) {
+		t.Fatalf("Dir() = %q, want an absolute path", got)
+	}
+	if filepath.Base(got) != "padl" {
+		t.Errorf("Dir() = %q, want it to end in padl", got)
+	}
+
+	if runtime.GOOS == "windows" {
+		appData, err := os.UserConfigDir()
+		if err != nil {
+			t.Skip("no user config dir on this machine")
+		}
+		if want := filepath.Join(appData, "padl"); got != want {
+			t.Errorf("Dir() = %q, want %q", got, want)
+		}
+		return
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory on this machine")
+	}
+	if want := filepath.Join(home, ".config", "padl"); got != want {
+		t.Errorf("Dir() = %q, want %q", got, want)
 	}
 }

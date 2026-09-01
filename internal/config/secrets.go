@@ -118,6 +118,12 @@ func (s *Secrets) Store(p Profile, password string) error {
 		return fmt.Errorf("profile %q does not use the keychain, password not saved", p.ID)
 	}
 	if err := s.kr().Set(KeyringService, p.ID, password); err != nil {
+		// A secret the backend refuses on size is not an unreachable keychain,
+		// and saying so would send the user looking for the wrong problem.
+		// Windows caps a credential blob at 2560 bytes.
+		if errors.Is(err, keyring.ErrSetDataTooBig) {
+			return fmt.Errorf("the OS keychain refused this password as too large: %w", err)
+		}
 		return &KeyringUnavailableError{Reason: err}
 	}
 	return nil

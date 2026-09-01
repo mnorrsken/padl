@@ -2,6 +2,23 @@
 
 All notable changes to PADL.
 
+## [0.2.0] - 2026-09-01
+
+### Added
+- **Windows binaries** — releases now carry `windows/amd64` and `windows/arm64`
+  alongside linux and darwin, and CI runs the unit tests on a real Windows
+  runner. The credential store needs no change: `go-keyring` uses the Windows
+  Credential Manager through wincred and maps a missing credential to the same
+  `ErrNotFound` that PADL's fall-back-to-prompt path already checks.
+
+### Changed
+- **Config location on Windows** is `%AppData%\padl` rather than `~/.config`.
+  `$XDG_CONFIG_HOME` still wins on every platform, so a dotfiles setup keeps
+  working under WSL and Git Bash. Nothing changes on macOS or Linux.
+- **A password the keychain refuses as too large** now says so instead of
+  claiming the keychain is unavailable. Windows caps a credential blob at 2560
+  bytes.
+
 ## [0.1.0] - 2026-08-31
 
 First release. PADL is a terminal LDAP browser: directory tree on the left,
