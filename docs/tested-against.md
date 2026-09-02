@@ -8,7 +8,7 @@ record of what has actually been exercised on a real server.
 | OpenLDAP | 2.4.57 (`osixia/openldap:1.5.0`) | plain, StartTLS, LDAPS | simple, anonymous | 2026-08-31 | The `make lab` directory. Covered by `make it` on every change. Publishes no `vendorName`; recognised from `structuralObjectClass: OpenLDAProotDSE`. |
 | lldap | 0.1.1 (`lldap/lldap:stable`) | plain | simple | 2026-08-31 | In the `make lab` set. Three quirks, all handled — see below. |
 | Active Directory | — | — | — | not yet | Needs a real DC. Untested: `defaultNamingContext` ordering, partition hiding, `objectGUID`/`objectSid`/FILETIME rendering against live values. |
-| eDirectory | — | — | — | not yet | Needs a real server. Untested: empty `namingContexts` on anonymous bind, `subordinateCount` as the child hint. |
+| eDirectory | OpenText/NetIQ 9.3.3 (CE26.1) | plain (anonymous only), StartTLS, LDAPS | simple, anonymous | 2026-09-02 | Not in `make it` — there is no public image, so CI cannot run it. Covered by the manual tests in `docs/manual-tests.md`. Findings below. |
 | 389 Directory Server | — | — | — | not yet | Expected to behave as generic LDAPv3. |
 
 ## lldap
@@ -47,6 +47,40 @@ A base-scope read at the lldap root has the same problem, returning four
 unrelated entries. PADL matches the requested DN among the results and reports
 that it could not read the entry rather than showing someone else's attributes
 under its heading.
+
+## eDirectory
+
+Everything PADL does for eDirectory was written from the documentation and left
+unproven until 9.3.3 was available to test against. All of it holds, with one
+correction.
+
+**`namingContexts` is empty — always.** The code used to say this happened for
+anonymous binds; in fact an authenticated administrator sees an empty
+`namingContexts` too. So the tree has no roots to discover and the profile's
+base DN override is not a nicety, it is required. Without it PADL says so and
+names the key that opens the profile editor.
+
+**A simple bind on the plain port is refused** with result 13, *Confidentiality
+Required* — the default is `LDAP TLS Required: Yes`. Anonymous reads over plain
+LDAP do work. Both StartTLS and LDAPS are available, and the server's
+certificate is self-signed, so a first connect goes through the trust prompt.
+
+**`subordinateCount` is the child hint**, as assumed — not `hasSubordinates` and
+not `numSubordinates`. `o=padl` reported `subordinateCount: 10` and listed ten
+children.
+
+**The eDirectory quick-search attribute list works.** Unlike lldap, eDirectory
+tolerates attributes it does not know inside an OR, so the broad list including
+`fullName` matches the same entries as `(cn=…)` alone rather than poisoning the
+filter.
+
+**RFC 2696 paging is supported** (`1.2.840.113556.1.4.319` is advertised): ten
+entries over five pages of two, each seen exactly once.
+
+Other details worth knowing: `subschemaSubentry` is `cn=schema`, not OpenLDAP's
+`cn=Subschema`; `ndsconfig` wants the administrator in dotted form
+(`cn=admin.o=example`) while LDAP wants commas; and object classes come back
+capitalised (`Organization`, `Top`), which PADL already folds.
 
 ## What the lab does cover
 

@@ -96,8 +96,8 @@ func TestBasesPrefersDefaultNamingContextAndHidesADPartitions(t *testing.T) {
 	}
 }
 
-// The override exists for eDirectory servers that hand an anonymous bind an
-// empty namingContexts; without it the operator gets an empty tree and no way
+// The override exists for eDirectory, which publishes an empty namingContexts
+// however you bind; without it the operator gets an empty tree and no way
 // forward.
 func TestBasesOverrideWinsAndRescuesEmptyRootDSE(t *testing.T) {
 	r := parseRootDSE(rootEntry(map[string][]string{

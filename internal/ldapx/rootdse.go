@@ -110,9 +110,10 @@ func hiddenADContexts(r *RootDSE) map[string]bool {
 // Bases returns the DNs the tree should show as roots.
 //
 // The profile's explicit base DN always wins — that override exists precisely
-// because eDirectory can return an empty namingContexts to an anonymous bind,
-// which would otherwise leave the operator staring at an empty tree with no way
-// forward.
+// because eDirectory returns an empty namingContexts, which would otherwise
+// leave the operator staring at an empty tree with no way forward. Measured on
+// eDirectory 9.3.3: empty for an authenticated admin bind, not only an
+// anonymous one.
 func (r *RootDSE) Bases(override string, showAll bool) []string {
 	if strings.TrimSpace(override) != "" {
 		return []string{strings.TrimSpace(override)}

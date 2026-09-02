@@ -166,9 +166,11 @@ server that has the entry. The bar always shows which attributes it will search.
 - **Active Directory** — the domain partition is shown first; the Configuration
   and Schema partitions hide behind `a`. `objectGUID`, `objectSid`,
   `userAccountControl` and FILETIME attributes are decoded.
-- **eDirectory** — `namingContexts` can come back empty for an anonymous bind,
-  which is what the profile's base DN override is for. `subordinateCount` is
-  read as the child-count hint.
+- **eDirectory** — publishes an empty `namingContexts` however you bind, which
+  is what the profile's base DN override is for, and refuses a simple bind on
+  the plain port, so use `ldaps` or `starttls`. `subordinateCount` is read as
+  the child-count hint. Verified against 9.3.3; see
+  [docs/manual-tests.md](docs/manual-tests.md).
 - **OpenLDAP** — recognised from its root DSE, which carries no `vendorName`.
 - **lldap** — accepts only `uid=<id>,ou=people,<base>` as a bind DN, and answers
   a one-level search at the root with the whole subtree. PADL rebuilds the real
@@ -187,6 +189,10 @@ make lab        # throwaway OpenLDAP (13389 / 13636) and lldap (13390)
 make it         # integration tests against the lab
 make lab-down
 ```
+
+Servers that cannot be run from a public image — eDirectory — have manual tests
+instead, gated behind environment variables and skipped by default. See
+[docs/manual-tests.md](docs/manual-tests.md).
 
 `make lab` is also the quickest way to try the UI:
 
