@@ -27,12 +27,20 @@ PADL  Lab  ldaps://ldap.example.com:636  OpenLDAP
 - LDAP, StartTLS and LDAPS, with **trust on first use** for certificates that do
   not chain to a system root.
 - Server profiles, with bind passwords in the OS keychain rather than a config file.
-- Binary attributes rendered rather than dumped: `objectGUID` and `objectSid` as
-  GUIDs and SIDs, `userAccountControl` decoded to flag names, timestamps in local
-  time, everything else as a hex dump on demand.
+- **Attributes decoded rather than dumped**, across Active Directory, Exchange,
+  eDirectory and Identity Manager: GUIDs and SIDs unpacked, flag words named
+  (`userAccountControl`, `groupType`, `systemFlags`, Kerberos encryption types),
+  enumerations named (`sAMAccountType`, Exchange recipient types, forest and
+  domain functional levels), timestamps in local time, password-policy intervals
+  as durations, `proxyAddresses` labelled primary or alias, and
+  `DirXML-Associations` split into driver, state and key. Everything else is a
+  hex dump on demand. A value PADL cannot make sense of is shown as it arrived
+  rather than guessed at.
 - **Followable DNs**: press enter on a `member`, `memberOf`, `manager` — any value
-  holding a DN, shown underlined — and the tree jumps to that entry, opening
-  whatever is closed on the way and paging into large containers to find it.
+  holding a DN, shown underlined — and you land on that entry's attributes, with
+  the tree opening whatever is closed on the way and paging into large containers
+  to find it. A value PADL renders rather than shows verbatim is never a link,
+  however much of a DN it ends in; enter opens its details instead.
 - **Back and forward** through the entries you have visited, like a browser.
 - **Search**: type bare words for a quick search — `mar nor` finds entries where
   something starts with `mar` *and* something starts with `nor`, across the
@@ -164,13 +172,23 @@ server that has the entry. The bar always shows which attributes it will search.
 
 
 - **Active Directory** — the domain partition is shown first; the Configuration
-  and Schema partitions hide behind `a`. `objectGUID`, `objectSid`,
-  `userAccountControl` and FILETIME attributes are decoded.
+  and Schema partitions hide behind `a`. Identifiers, flag words, enumerations,
+  FILETIME stamps and the negative FILETIME intervals the password policy is
+  stored in are all decoded, as are Exchange's recipient types and
+  `proxyAddresses`.
 - **eDirectory** — publishes an empty `namingContexts` however you bind, which
   is what the profile's base DN override is for, and refuses a simple bind on
   the plain port, so use `ldaps` or `starttls`. `subordinateCount` is read as
-  the child-count hint. Verified against 9.3.3; see
-  [docs/manual-tests.md](docs/manual-tests.md).
+  the child-count hint. Its login and password times are decoded, its policy
+  intervals — plain second counts, unlike AD's — read as durations, and each
+  `ACL` value is unpacked into the rights it grants, over what, to whom. The
+  rights bits mean different things depending on whether the entry protects
+  `[Entry Rights]` or a named attribute, and PADL reads the right table.
+  Verified against 9.3.3; see [docs/manual-tests.md](docs/manual-tests.md).
+- **NetIQ Identity Manager** — `DirXML-Associations` is split into the driver,
+  the association state and the key the connected system knows the object by,
+  which is the value you read first when something is not syncing. Written from
+  the documentation and not yet run against a live IDM.
 - **OpenLDAP** — recognised from its root DSE, which carries no `vendorName`.
 - **lldap** — accepts only `uid=<id>,ou=people,<base>` as a bind DN, and answers
   a one-level search at the root with the whole subtree. PADL rebuilds the real
@@ -191,6 +209,20 @@ make it         # integration tests against the lab
 make lab-down
 ```
 
+To browse the lab by hand rather than run tests against it:
+
+```sh
+make lab-profiles     # start every lab server, add a profile for each to your config
+padl                  # press p, pick one
+make lab-profiles-rm  # take the profiles and their keychain entries away again
+```
+
+That writes to your real `profiles.yaml` and, like saving a server in the UI,
+puts each lab password in the OS keychain. Only profiles whose ID starts with
+`lab-` are touched, and `lab-profiles-rm` removes exactly those. Pass `-prompt`
+to `go run ./dev/labprofiles` if you would rather be asked for the password than
+have it stored.
+
 The AD container is a Samba domain controller — that is how you get a domain
 into a container — and it provisions the domain the first time it starts, which
 takes the best part of a minute; the other two are up in seconds. It refuses a
@@ -200,8 +232,10 @@ administrator password is `Padl-Lab-1` rather than the lab's usual one, because
 AD enforces complexity on it; the seeded users have `padl-lab`.
 
 Servers that cannot be run from a public image — eDirectory — have manual tests
-instead, gated behind environment variables and skipped by default. See
-[docs/manual-tests.md](docs/manual-tests.md).
+instead, gated behind environment variables and skipped by default. If you have
+an eDirectory image, copy `dev/edir.env.example` to `dev/edir.env` (gitignored)
+and fill it in; `make lab-profiles` then brings that up alongside the rest and
+adds a profile for it too. See [docs/manual-tests.md](docs/manual-tests.md).
 
 `make lab` is also the quickest way to try the UI:
 

@@ -571,6 +571,13 @@ func (a *App) objectKeys(ev *tcell.EventKey) *tcell.EventKey {
 	case 'L':
 		a.copyEntryAsLDIF()
 		return nil
+	case 'b':
+		// Bookmarking is about the entry, not about which pane is showing it —
+		// and following a link now lands here rather than on the tree, so
+		// leaving it a tree-only key would put a tab between arriving somewhere
+		// and being able to keep it.
+		a.toggleBookmark()
+		return nil
 	}
 	return ev
 }
@@ -605,7 +612,7 @@ func (a *App) refreshHints() {
 	case a.GetFocus() == a.tree:
 		a.status.setKeys("[tree] enter expand · r reload · y copy dn · b bookmark · L ldif · E export · " + common)
 	default:
-		a.status.setKeys("[object] enter follow/inspect · o operational · y copy value · L ldif · " + common)
+		a.status.setKeys("[object] enter follow/inspect · o operational · y copy value · b bookmark · L ldif · " + common)
 	}
 }
 
@@ -1130,8 +1137,12 @@ func (a *App) walkTo(w *walk) {
 	}
 
 	if w.index == len(w.path)-1 {
+		// Arrived. The tree cursor moves so the entry's place is visible, but
+		// focus goes to the object pane: a jump is made to read the entry, not
+		// to stand next to it in the tree. Landing on the tree meant a tab
+		// before you could scroll the attributes of the thing you asked for.
 		a.tree.SetCurrentNode(n)
-		a.SetFocus(a.tree)
+		a.SetFocus(a.object.table)
 		a.refreshHints()
 		a.status.ok("%s", target)
 		return

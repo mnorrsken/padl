@@ -8,7 +8,7 @@ record of what has actually been exercised on a real server.
 | OpenLDAP | 2.4.57 (`osixia/openldap:1.5.0`) | plain, StartTLS, LDAPS | simple, anonymous | 2026-08-31 | The `make lab` directory. Covered by `make it` on every change. Publishes no `vendorName`; recognised from `structuralObjectClass: OpenLDAProotDSE`. |
 | lldap | 0.1.1 (`lldap/lldap:stable`) | plain | simple | 2026-08-31 | In the `make lab` set. Three quirks, all handled — see below. |
 | Active Directory | Samba 4.23.10 as the DC (`instantlinux/samba-dc:4.23.10-r0`) | StartTLS, LDAPS (cleartext refused by the server) | simple, by DN, UPN and `DOMAIN\user` | 2026-09-03 | In the `make lab` set: a domain to test AD against without a Windows DC. Same root DSE markers, attribute syntaxes and paging control, which is all PADL branches on. Untested still: a Windows DC, a multi-domain forest, and global catalog on 3268. |
-| eDirectory | OpenText/NetIQ 9.3.3 (CE26.1) | plain (anonymous only), StartTLS, LDAPS | simple, anonymous | 2026-09-02 | Not in `make it` — there is no public image, so CI cannot run it. Covered by the manual tests in `docs/manual-tests.md`. Findings below. |
+| eDirectory | OpenText/NetIQ 9.3.3 (CE26.1) | plain (anonymous only), StartTLS, LDAPS | simple, anonymous | 2026-09-03 | Not in `make it` — there is no public image, so CI cannot run it. Covered by the manual tests in `docs/manual-tests.md`. Findings below. |
 | 389 Directory Server | — | — | — | not yet | Expected to behave as generic LDAPv3. |
 
 ## lldap
@@ -93,7 +93,21 @@ They are skipped rather than followed.
 **Everything the AD renderers do is exercised on live values**: `objectSid`
 unpacked to `S-1-5-21-…`, `objectGUID` with its first three fields byte-swapped,
 `userAccountControl: 512` named as `NORMAL_ACCOUNT`, `pwdLastSet` as a FILETIME
-and `whenCreated` as generalizedTime.
+and `whenCreated` as generalizedTime. The domain object adds the password policy
+and the group its flag word.
+
+**Flag words arrive as signed decimals.** This is the detail no documentation
+says out loud and the reason the decoder reads them signed before taking them as
+unsigned 32 bits: the lab's global security group reports `groupType:
+-2147483646` (0x80000002) and the domain head `systemFlags: -1946157056`
+(0x8C000000). Parsing either as an unsigned integer fails outright, so the flags
+would never have been named.
+
+**The password policy is stored as negative FILETIME intervals.** `maxPwdAge`
+and `forceLogoff` hold int64's minimum when they mean "never"; `minPwdAge`
+reports -864000000000 for one day and `lockoutDuration` -18000000000 for thirty
+minutes. eDirectory writes the same kind of setting as a plain second count,
+which is why the two are decoded separately.
 
 **RFC 2696 paging is advertised and works**, walked one entry at a time.
 
@@ -125,6 +139,26 @@ filter.
 
 **RFC 2696 paging is supported** (`1.2.840.113556.1.4.319` is advertised): ten
 entries over five pages of two, each seen exactly once.
+
+**`ACL` values are decoded, and the rights bits are context-dependent.** The
+value is `privileges#scope#trustee#protectedName`, and the privilege mask means
+one thing when the protected name is `[Entry Rights]` and another for a named
+attribute or `[All Attributes Rights]`: 0x04 is Delete in the first reading and
+Write in the second, and Supervisor moves from 0x10 to 0x20. Two high bits sit
+alongside either — 0x20000000 for dynamic group members and 0x40000000 for
+iManager Role Based Services — which is why a real ACL value is a number in the
+billions. Written from Micro Focus KB 7006280, the LDAP Explorer Novell ACL
+editor manual and LDAPWiki's Object ACL page — and then confirmed against 9.3.3,
+which settles it: the server object carries `16#subtree#…#[Entry Rights]` and
+`32#subtree#…#[All Attributes Rights]`, supervisor both times, at two different
+bits. A single rights table would have had one of them wrong.
+
+All fourteen distinct ACL values on the lab tree decode; none fall through. One
+is worth noting: `47#entry#cn=edir1,o=padl#[Entry Rights]` sets 0x20, which has
+no entry-rights meaning — the same object has the same 47 over
+`[All Attributes Rights]`, where it is supervisor, so the server appears to
+write one mask into both. PADL shows the bit as `0x20` rather than dropping it
+or calling it supervisor.
 
 Other details worth knowing: `subschemaSubentry` is `cn=schema`, not OpenLDAP's
 `cn=Subschema`; `ndsconfig` wants the administrator in dotted form
@@ -174,6 +208,9 @@ Against the Samba domain controller:
 - StartTLS and LDAPS, both through the trust prompt
 - `objectSid`, `objectGUID`, `userAccountControl` and `pwdLastSet` rendered from
   live values rather than from hand-built bytes
+- the domain's `maxPwdAge`, `minPwdAge`, `lockoutDuration`, `instanceType`,
+  `systemFlags` and `msDS-Behavior-Version`, and the group's `groupType` and
+  `sAMAccountType`, decoded from what the server actually sent
 - quick search reaching an entry by `sAMAccountName` matched as typed, by a
   prefix of the display name, and by two words narrowing
 - paging a container one entry at a time, each seen exactly once

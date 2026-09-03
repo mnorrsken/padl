@@ -31,7 +31,7 @@ jobs:
       - name: Check formatting
         if: runner.os == 'Linux'
         run: |
-          unformatted=$(gofmt -l cmd internal)
+          unformatted=$(gofmt -l cmd internal dev)
           if [ -n "$unformatted" ]; then
             echo "gofmt needed on:"; echo "$unformatted"; exit 1
           fi

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -47,58 +48,73 @@ var binaryAttrs = map[string]bool{
 	"publickey":                 true,
 }
 
-// generalizedTimeAttrs hold LDAP generalizedTime, which is readable but ugly.
-var generalizedTimeAttrs = map[string]bool{
-	"whencreated":       true,
-	"whenchanged":       true,
-	"createtimestamp":   true,
-	"modifytimestamp":   true,
-	"pwdchangedtime":    true,
-	"pwdlastset":        true, // AD: FILETIME, handled separately
-	"expirationtime":    true,
-	"logintime":         true, // eDirectory
-	"passwordexpiratio": true,
+// rendering says how one attribute's values are turned into something readable.
+type rendering struct {
+	// render produces the display text. Reporting false leaves the value to the
+	// generic handling below, so a renderer never has to be certain: a value
+	// that is not the shape it expects falls through to plain text or a hex
+	// dump rather than becoming a lie.
+	render func(raw []byte) (string, bool)
+	// binary marks a value whose text is a rendering of bytes rather than the
+	// bytes themselves. The object pane offers a hex dump for those.
+	binary bool
 }
 
-// filetimeAttrs hold Windows FILETIME as a decimal string: 100ns ticks since
-// 1601. AD reports several important timestamps this way.
-var filetimeAttrs = map[string]bool{
-	"pwdlastset":         true,
-	"lastlogon":          true,
-	"lastlogontimestamp": true,
-	"accountexpires":     true,
-	"badpasswordtime":    true,
-	"lastlogoff":         true,
+// renderings is every attribute PADL knows how to say something about, keyed by
+// lowercased name with any ";option" suffix stripped.
+//
+// Two kinds of rendering live here and the difference is deliberate. A value
+// nobody can read — a GUID, a SID, a FILETIME — is *replaced* by its rendering.
+// A value that is readable but means more than it says — a flag word, an
+// enumerated type, an address with a prefix — keeps its original text and gains
+// the meaning in parentheses, so what the user copies with `y` is still the
+// value the directory holds.
+var renderings = mergeRenderings(
+	commonRenderings,
+	adRenderings,
+	exchangeRenderings,
+	edirectoryRenderings,
+	idmRenderings,
+)
+
+// commonRenderings are the standard LDAP operational attributes every server
+// publishes, so they do not belong to any vendor's table.
+var commonRenderings = map[string]rendering{
+	"createtimestamp": decodeText(formatGeneralizedTime),
+	"modifytimestamp": decodeText(formatGeneralizedTime),
+}
+
+// mergeRenderings folds the per-vendor tables into one. Names are expected not
+// to collide; TestRenderingTablesDoNotCollide holds that to it, because a
+// silent overwrite here would be a vendor's attribute quietly rendered by
+// another's rules.
+func mergeRenderings(tables ...map[string]rendering) map[string]rendering {
+	out := map[string]rendering{}
+	for _, t := range tables {
+		for name, r := range t {
+			out[name] = r
+		}
+	}
+	return out
+}
+
+// baseAttrName lowercases an attribute description and drops its options, so
+// "userCertificate;binary" and "userCertificate" look the same to the tables.
+func baseAttrName(attr string) string {
+	name := strings.ToLower(attr)
+	if i := strings.IndexByte(name, ';'); i >= 0 {
+		name = name[:i]
+	}
+	return name
 }
 
 // Format renders one raw attribute value for display.
 func Format(attr string, raw []byte) Value {
-	name := strings.ToLower(attr)
-	// Some servers tag attributes as ";binary"; the base name is what matters.
-	if i := strings.IndexByte(name, ';'); i >= 0 {
-		name = name[:i]
-	}
+	name := baseAttrName(attr)
 
-	switch {
-	case name == "objectguid" || name == "guid":
-		if s, ok := formatGUID(raw); ok {
-			return Value{Text: s, Binary: true, Raw: raw}
-		}
-	case name == "objectsid":
-		if s, ok := formatSID(raw); ok {
-			return Value{Text: s, Binary: true, Raw: raw}
-		}
-	case name == "useraccountcontrol":
-		if s, ok := formatUAC(string(raw)); ok {
-			return Value{Text: s, Raw: raw}
-		}
-	case filetimeAttrs[name]:
-		if s, ok := formatFiletime(string(raw)); ok {
-			return Value{Text: s, Raw: raw}
-		}
-	case generalizedTimeAttrs[name]:
-		if s, ok := formatGeneralizedTime(string(raw)); ok {
-			return Value{Text: s, Raw: raw}
+	if r, ok := renderings[name]; ok {
+		if text, ok := r.render(raw); ok {
+			return Value{Text: text, Binary: r.binary, Raw: raw}
 		}
 	}
 
@@ -106,6 +122,109 @@ func Format(attr string, raw []byte) Value {
 		return Value{Text: describeBinary(raw), Binary: true, Raw: raw}
 	}
 	return Value{Text: string(raw), Raw: raw}
+}
+
+// ---------------------------------------------------------------- decoders
+//
+// The building blocks the vendor tables are written in. Each takes the shape a
+// value arrives in and returns display text, or false to fall through.
+
+// decodeText adapts a renderer that works on the value as a string, which is
+// most of them: these attributes are integers written out in decimal.
+func decodeText(f func(string) (string, bool)) rendering {
+	return rendering{render: func(raw []byte) (string, bool) {
+		if !utf8.Valid(raw) {
+			return "", false
+		}
+		return f(string(raw))
+	}}
+}
+
+// decodeBytes adapts a renderer that works on the raw octets, and marks the
+// result as a rendering of binary rather than as the value itself.
+func decodeBytes(f func([]byte) (string, bool)) rendering {
+	return rendering{render: f, binary: true}
+}
+
+// flag is one named bit in a flag word.
+type flag struct {
+	bit  uint32
+	name string
+}
+
+// bitField names the bits set in a flag word.
+//
+// The number is read as signed and then taken as unsigned 32 bits, because
+// Active Directory writes these out signed: a global security group's groupType
+// arrives as -2147483646, and the domain head's systemFlags as -1946157056.
+// Reading either as unsigned would fail outright.
+func bitField(flags []flag) func(string) (string, bool) {
+	return func(s string) (string, bool) {
+		s = strings.TrimSpace(s)
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n > math.MaxUint32 || n < math.MinInt32 {
+			return "", false
+		}
+		set := namedBits(uint32(n), flags)
+		if len(set) == 0 {
+			return s, true
+		}
+		return fmt.Sprintf("%s (%s)", s, strings.Join(set, " | ")), true
+	}
+}
+
+// namedBits lists the flags set in v, taking more than one table because some
+// values carry bits from two vocabularies at once — an eDirectory ACL holds
+// rights bits alongside flags that mean the same thing whatever the rights are.
+//
+// Anything left over is appended as hex. A bit nobody has named is still a bit
+// that is set, and silently dropping it would read as "not set".
+func namedBits(v uint32, tables ...[]flag) []string {
+	var set []string
+	var known uint32
+	for _, t := range tables {
+		for _, f := range t {
+			known |= f.bit
+			if v&f.bit != 0 {
+				set = append(set, f.name)
+			}
+		}
+	}
+	if rest := v &^ known; rest != 0 {
+		set = append(set, fmt.Sprintf("0x%x", rest))
+	}
+	return set
+}
+
+// enumeration names a value that is one of a fixed set rather than a set of
+// bits. The number stays: it is what a script or a Microsoft article will use.
+func enumeration(names map[int64]string) func(string) (string, bool) {
+	return func(s string) (string, bool) {
+		s = strings.TrimSpace(s)
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return "", false
+		}
+		name, ok := names[n]
+		if !ok {
+			return "", false
+		}
+		return fmt.Sprintf("%s (%s)", s, name), true
+	}
+}
+
+// Rendered reports whether PADL turns this attribute's values into something
+// other than the value itself.
+//
+// The object pane has to know, because a rendered Text is a description and a
+// description is never a reference to follow. An eDirectory ACL comes out as
+// "[Entry Rights]: supervisor · subtree · cn=edir1,o=padl", which ends in a DN
+// that really is in the tree and parses as one — so without this it would be
+// underlined and enter would walk off to the trustee, which is not what the
+// value points at.
+func Rendered(attr string) bool {
+	_, ok := renderings[baseAttrName(attr)]
+	return ok
 }
 
 // FormatAll renders every value of an attribute.
@@ -271,53 +390,68 @@ func formatFiletime(s string) (string, bool) {
 	return t.Format("2006-01-02 15:04:05 MST"), true
 }
 
-// uacFlags are the userAccountControl bits worth naming. Showing the decoded
-// list matters because "512" vs "514" is the difference between an enabled and
-// a disabled account, and nobody reads that from the number.
-var uacFlags = []struct {
-	bit  uint32
-	name string
-}{
-	{0x0000001, "SCRIPT"},
-	{0x0000002, "ACCOUNTDISABLE"},
-	{0x0000008, "HOMEDIR_REQUIRED"},
-	{0x0000010, "LOCKOUT"},
-	{0x0000020, "PASSWD_NOTREQD"},
-	{0x0000040, "PASSWD_CANT_CHANGE"},
-	{0x0000080, "ENCRYPTED_TEXT_PWD_ALLOWED"},
-	{0x0000100, "TEMP_DUPLICATE_ACCOUNT"},
-	{0x0000200, "NORMAL_ACCOUNT"},
-	{0x0000800, "INTERDOMAIN_TRUST_ACCOUNT"},
-	{0x0001000, "WORKSTATION_TRUST_ACCOUNT"},
-	{0x0002000, "SERVER_TRUST_ACCOUNT"},
-	{0x0010000, "DONT_EXPIRE_PASSWORD"},
-	{0x0020000, "MNS_LOGON_ACCOUNT"},
-	{0x0040000, "SMARTCARD_REQUIRED"},
-	{0x0080000, "TRUSTED_FOR_DELEGATION"},
-	{0x0100000, "NOT_DELEGATED"},
-	{0x0200000, "USE_DES_KEY_ONLY"},
-	{0x0400000, "DONT_REQ_PREAUTH"},
-	{0x0800000, "PASSWORD_EXPIRED"},
-	{0x1000000, "TRUSTED_TO_AUTH_FOR_DELEGATION"},
-	{0x4000000, "PARTIAL_SECRETS_ACCOUNT"},
-}
-
-func formatUAC(s string) (string, bool) {
-	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 32)
+// formatFiletimeInterval renders the durations Active Directory stores as
+// *negative* FILETIME intervals: maxPwdAge, lockoutDuration and the rest of the
+// domain password policy. A domain with a 30-minute lockout reports
+// -18000000000, which says nothing to anybody.
+//
+// int64's minimum is the policy's "never": that is what maxPwdAge holds when
+// passwords do not expire, and forceLogoff when nobody is forced off.
+func formatFiletimeInterval(s string) (string, bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil {
 		return "", false
 	}
-	v := uint32(n)
-	var set []string
-	for _, f := range uacFlags {
-		if v&f.bit != 0 {
-			set = append(set, f.name)
-		}
+	switch {
+	case n == math.MinInt64:
+		return "never", true
+	case n == 0:
+		return "0 (not set)", true
+	case n > 0:
+		// These are stored negative. A positive one is not an interval, so say
+		// nothing rather than report a duration backwards.
+		return "", false
 	}
-	if len(set) == 0 {
-		return s, true
+	return humanDuration(time.Duration(-n) * 100), true
+}
+
+// formatSecondsInterval renders the plain second counts eDirectory uses for the
+// same kind of policy value.
+func formatSecondsInterval(s string) (string, bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n < 0 {
+		return "", false
 	}
-	return fmt.Sprintf("%s (%s)", s, strings.Join(set, " | ")), true
+	if n == 0 {
+		return "0 (not set)", true
+	}
+	return humanDuration(time.Duration(n) * time.Second), true
+}
+
+// humanDuration writes a policy interval the way someone would say it. These
+// are configured in whole days, hours or minutes almost without exception, so
+// the common cases come out exact and anything odd falls back to Go's own
+// rendering rather than being rounded into a lie.
+func humanDuration(d time.Duration) string {
+	switch {
+	case d%(24*time.Hour) == 0:
+		return quantity(int(d/(24*time.Hour)), "day")
+	case d%time.Hour == 0:
+		return quantity(int(d/time.Hour), "hour")
+	case d%time.Minute == 0:
+		return quantity(int(d/time.Minute), "minute")
+	case d%time.Second == 0:
+		return quantity(int(d/time.Second), "second")
+	default:
+		return d.String()
+	}
+}
+
+func quantity(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // HexDump renders a binary value for the detail popup, in the usual

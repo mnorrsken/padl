@@ -7,7 +7,8 @@ variables and run by hand.
 They are ordinary Go tests living next to the code, and they skip silently
 unless their variable is set — so `go test ./...` and `make it` are unaffected.
 
-Nothing here hardcodes a server, an image or a registry. Supply your own.
+Nothing here hardcodes a server, an image or a registry. Supply your own, in
+`dev/edir.env`, which is gitignored — see `dev/edir.env.example`.
 
 ## eDirectory
 
@@ -37,26 +38,35 @@ an empty `namingContexts`, so PADL cannot discover where the tree starts.
 
 ### Bringing up a server
 
-If you have an eDirectory container image, it configures a tree from the
-arguments you pass it:
+Put your image name and tree password in `dev/edir.env`, which is gitignored:
 
 ```sh
-docker run -d --name padl-edir \
+cp dev/edir.env.example dev/edir.env
+$EDITOR dev/edir.env          # PADL_EDIR_IMAGE and PADL_EDIR_PASSWORD
+make lab-edir                 # or make lab-profiles, which does the rest too
+```
+
+`dev/lab-edir.sh` configures the tree and waits for it. Without `dev/edir.env`
+it says so and exits successfully, so the rest of the lab is unaffected. If an
+eDirectory container is already running — under either `padl-lab-edir` or the
+`padl-edir` name earlier versions of this page used — it is left alone and
+reused, because configuring a tree takes minutes.
+
+What the script runs, if you would rather do it by hand:
+
+```sh
+docker run -d --name padl-lab-edir \
   -p 13391:389 -p 13637:636 \
   <your-edirectory-image> \
   new -t PADLTREE -n o=padl -S edir1 \
       -a cn=admin.o=padl -w '<password>' \
       -i -B 127.0.0.1@524 -L 389 -l 636 --configure-eba-now no
+
+docker logs -f padl-lab-edir     # wait for "successfully configured"
 ```
 
-Then wait for it — first configuration takes a few minutes, longer under
-emulation if the image is amd64 and you are not:
-
-```sh
-docker logs -f padl-edir     # wait for "successfully configured"
-```
-
-Two things that will waste your time otherwise:
+First configuration takes a few minutes, longer under emulation if the image is
+amd64 and you are not. Two things that will waste your time otherwise:
 
 - **`-a` takes the dotted form.** `cn=admin,o=padl` fails with `illegal ds name`.
 - **`-i` skips the duplicate-tree lookup.** Without it the configure step hunts

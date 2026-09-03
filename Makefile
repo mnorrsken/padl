@@ -6,10 +6,11 @@ LDFLAGS := -s -w -X $(PKG)/internal/version.Version=$(VERSION) -X $(PKG)/interna
 
 COMPOSE := docker compose -f dev/docker-compose.yml
 
-.PHONY: help build run test race it lint fmt vet tidy clean lab lab-down lab-logs dist
+.PHONY: help build run test race it lint fmt vet tidy clean lab lab-down lab-logs \
+	lab-edir lab-profiles lab-profiles-rm dist
 
 help: ## Show this help
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build ./bin/padl
 	go build -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/$(BINARY)
@@ -34,7 +35,7 @@ vet: ## go vet
 	go vet ./...
 
 fmt: ## Format
-	gofmt -w cmd internal
+	gofmt -w cmd internal dev
 
 tidy: ## Tidy go.mod
 	go mod tidy
@@ -56,8 +57,19 @@ lab: ## Start the throwaway directories (OpenLDAP + lldap + Samba AD) and wait f
 	@echo "lldap:    ldap://127.0.0.1:13390  (web ui on http://127.0.0.1:17170)"
 	@echo "samba ad: ldaps://127.0.0.1:13638  starttls://127.0.0.1:13392  (cleartext binds refused)"
 
+lab-edir: ## Start the eDirectory container (needs dev/edir.env; skipped without it)
+	@./dev/lab-edir.sh
+
+lab-profiles: lab lab-edir ## Start every lab server and add a profile for each to your PADL config
+	@set -a; if [ -f dev/edir.env ]; then . ./dev/edir.env; fi; set +a; \
+		go run ./dev/labprofiles
+
+lab-profiles-rm: ## Remove those profiles and their keychain entries
+	@go run ./dev/labprofiles -rm
+
 lab-down: ## Stop and delete the lab directories
 	$(COMPOSE) down -v
+	@docker rm -f padl-lab-edir >/dev/null 2>&1 && echo "removed padl-lab-edir" || true
 
 lab-logs: ## Follow the lab directories' logs
 	$(COMPOSE) logs -f

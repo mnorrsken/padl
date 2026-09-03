@@ -5,3 +5,4 @@
 .DS_Store
 dev/certs/
 __pycache__/
+dev/edir.env

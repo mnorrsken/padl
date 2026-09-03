@@ -24,9 +24,13 @@ type statusBar struct {
 
 func newStatusBar() *statusBar {
 	s := &statusBar{
-		Flex:  tview.NewFlex().SetDirection(tview.FlexRow),
-		line:  tview.NewTextView().SetDynamicColors(true),
-		keys:  tview.NewTextView().SetDynamicColors(true),
+		Flex: tview.NewFlex().SetDirection(tview.FlexRow),
+		line: tview.NewTextView().SetDynamicColors(true),
+		// The hints are plain text and deliberately not tagged: they open with
+		// the focused pane in square brackets, "[tree]" or "[object]", which a
+		// tag parser reads as a colour it does not know and swallows whole. The
+		// label had been invisible for exactly that reason.
+		keys:  tview.NewTextView(),
 		color: colorText,
 	}
 	s.line.SetBackgroundColor(colorBackground)

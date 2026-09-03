@@ -229,10 +229,17 @@ func buildRows(e *ldapx.Entry, bases []string) []objectRow {
 			})
 			continue
 		}
+		// Whether this attribute can hold a reference at all is a property of
+		// the attribute, not of each value.
+		rendered := ldapx.Rendered(a.Name)
 		for i, v := range values {
 			link := ""
-			// A binary value is never a reference, whatever its bytes spell.
-			if !v.Binary && ldapx.IsDNUnder(v.Text, bases) {
+			// A binary value is never a reference, whatever its bytes spell,
+			// and neither is a rendered one: its text describes the value
+			// rather than being it. An ACL renders as something ending in the
+			// trustee's DN, which is in the tree and parses as one — following
+			// it would go somewhere the value does not point.
+			if !v.Binary && !rendered && ldapx.IsDNUnder(v.Text, bases) {
 				link = strings.TrimSpace(v.Text)
 			}
 			rows = append(rows, objectRow{

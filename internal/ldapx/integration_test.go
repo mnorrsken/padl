@@ -907,6 +907,68 @@ func TestIntegrationADRendersItsOwnAttributes(t *testing.T) {
 	}
 }
 
+// The domain object carries the password policy, which AD stores as negative
+// FILETIME intervals, and the group carries the flag word that decides what
+// kind of group it is. Both are numbers nobody reads.
+func TestIntegrationADRendersPolicyAndGroupFlags(t *testing.T) {
+	requireIT(t)
+	c := connectAD(t, config.SecurityLDAPS)
+
+	first := func(dn, attr string) string {
+		t.Helper()
+		e, err := c.Entry(ctx(t), dn, false)
+		if err != nil {
+			t.Fatalf("read %s: %v", dn, err)
+		}
+		for _, a := range e.Attributes {
+			if strings.EqualFold(a.Name, attr) {
+				return ldapx.FormatAll(a)[0].Text
+			}
+		}
+		t.Fatalf("%s has no %s", dn, attr)
+		return ""
+	}
+
+	// The lab domain: passwords never expire, minimum age a day, lockout
+	// window half an hour.
+	if got := first(itADBaseDN, "maxPwdAge"); got != "never" {
+		t.Errorf("maxPwdAge = %q, want never", got)
+	}
+	if got := first(itADBaseDN, "minPwdAge"); got != "1 day" {
+		t.Errorf("minPwdAge = %q, want 1 day", got)
+	}
+	if got := first(itADBaseDN, "lockoutDuration"); !strings.Contains(got, "minute") &&
+		!strings.Contains(got, "not set") {
+		t.Errorf("lockoutDuration = %q, want a duration", got)
+	}
+	// instanceType 5 on a naming context head, and the functional level named.
+	if got := first(itADBaseDN, "instanceType"); !strings.Contains(got, "NC_HEAD") {
+		t.Errorf("instanceType = %q, want NC_HEAD named", got)
+	}
+	if got := first(itADBaseDN, "msDS-Behavior-Version"); !strings.Contains(got, "Windows Server") {
+		t.Errorf("msDS-Behavior-Version = %q, want the level named", got)
+	}
+	// systemFlags arrives negative, which is the case a uint parse would miss.
+	if got := first(itADBaseDN, "systemFlags"); !strings.Contains(got, "DISALLOW_DELETE") {
+		t.Errorf("systemFlags = %q, want the flags named", got)
+	}
+
+	group := "CN=engineers,OU=Groups," + itADBaseDN
+	if got := first(group, "groupType"); !strings.Contains(got, "SECURITY_ENABLED") ||
+		!strings.Contains(got, "GLOBAL") {
+		t.Errorf("groupType = %q, want a global security group", got)
+	}
+	if got := first(group, "sAMAccountType"); !strings.Contains(got, "SAM_GROUP_OBJECT") {
+		t.Errorf("sAMAccountType = %q, want it named", got)
+	}
+	if got := first(itADUserDN, "sAMAccountType"); !strings.Contains(got, "SAM_USER_OBJECT") {
+		t.Errorf("user sAMAccountType = %q, want it named", got)
+	}
+	if got := first(itADUserDN, "primaryGroupID"); !strings.Contains(got, "Domain Users") {
+		t.Errorf("primaryGroupID = %q, want the well-known group named", got)
+	}
+}
+
 // A quick search on AD leads with sAMAccountName, and matches it as typed
 // rather than by prefix. Both halves are worth proving against a real server:
 // the attribute list because AD is the least forgiving of a name it does not

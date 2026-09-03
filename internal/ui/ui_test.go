@@ -1313,6 +1313,89 @@ func TestFollowDNJumpsToTheEntryInTheTree(t *testing.T) {
 }
 
 // The link works in both directions: memberOf goes back to the group.
+// A jump is made to read the entry, not to stand beside it in the tree. Landing
+// on the tree cost a tab before the attributes of the thing you asked for could
+// be scrolled at all.
+func TestFollowDNLandsInTheObjectPane(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=Groups")
+
+	h.key(tcell.KeyDown) // ou=Groups
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
+
+	h.key(tcell.KeyTab)
+	h.selectValueRow("uid=jdoe,ou=People,dc=example,dc=com")
+	h.key(tcell.KeyEnter)
+	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com", "John Doe")
+
+	// The key hints name the focused pane, which is the plainest statement of
+	// where the keyboard now goes.
+	h.waitFor("[object]")
+	if strings.Contains(h.text(), "[tree]") {
+		t.Errorf("focus should have left the tree:\n%s", h.text())
+	}
+
+	// And it really is focused: 'o' is an object-pane key and has to act.
+	h.rune('o')
+	h.waitFor("createTimestamp")
+
+	// The tree still shows where the entry sits, even without focus.
+	style, ok := h.styleOf("[u] uid=jdoe")
+	if !ok {
+		t.Fatalf("uid=jdoe is not in the tree:\n%s", h.text())
+	}
+	if _, bg, _ := style.Decompose(); bg != tcell.ColorBlue {
+		t.Errorf("the jump target should still be the selected row, got background %v", bg)
+	}
+}
+
+// A rendered value's text is a description, and an eDirectory ACL's description
+// ends in the trustee's DN — which is in the tree and parses as one. Following
+// it would walk off to the trustee, which is not what the value points at.
+func TestRenderedValuesAreNotLinks(t *testing.T) {
+	d := withGroup(sampleDir())
+	engineers := "cn=engineers,ou=Groups,dc=example,dc=com"
+	d.entries[engineers].Attributes = append(d.entries[engineers].Attributes,
+		attr("ACL", "16#subtree#"+engineers+"#[Entry Rights]"))
+
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=Groups")
+	h.key(tcell.KeyDown)
+	h.key(tcell.KeyRight)
+	h.waitFor("cn=engineers")
+	h.key(tcell.KeyDown)
+
+	rendered := "[Entry Rights]: supervisor · subtree · " + engineers
+	h.waitFor(rendered)
+
+	if h.isLink(rendered) {
+		t.Errorf("a rendered ACL must not be underlined as a reference:\n%s", h.text())
+	}
+	// The member DN beside it still is one, so this has not simply turned
+	// linking off.
+	if !h.isLink("uid=jdoe,ou=People,dc=example,dc=com") {
+		t.Errorf("member should still render as a link:\n%s", h.text())
+	}
+
+	// Enter on it opens the value inspector rather than jumping anywhere.
+	h.key(tcell.KeyTab)
+	h.selectValueRow(rendered)
+	h.key(tcell.KeyEnter)
+	h.waitFor("esc to close", "ACL")
+	if strings.Contains(h.text(), "dn: "+engineers+"\n") {
+		// Still on the group: the jump must not have happened.
+		t.Log("still showing the group, as it should be")
+	}
+	h.key(tcell.KeyEscape)
+	h.waitUntil("the inspector to close", func() bool {
+		return !strings.Contains(h.text(), "esc to close")
+	})
+}
+
 func TestFollowDNGoesBackUpToTheGroup(t *testing.T) {
 	d := withGroup(sampleDir())
 	h := start(t, testProfile(), okConnector(d), nil)
@@ -1643,13 +1726,14 @@ func TestBookmarkRoundTripThroughTheUI(t *testing.T) {
 		t.Fatalf("the bookmark did not reach the profile: %+v", p.Bookmarks)
 	}
 
-	// And it comes back as a way to navigate.
+	// And it comes back as a way to navigate. Going to it lands in the object
+	// pane, the same as following any other link.
 	h.rune('B')
 	h.waitFor("Bookmarks — Lab", "ou=People,dc=example,dc=com")
 	h.key(tcell.KeyEnter)
-	h.waitFor("dn: ou=People,dc=example,dc=com")
+	h.waitFor("dn: ou=People,dc=example,dc=com", "[object]")
 
-	// Pressing b again removes it.
+	// Pressing b again removes it, from there rather than only from the tree.
 	h.rune('b')
 	h.waitFor("removed the bookmark")
 	p, _ = h.profiles.Get("lab")
@@ -1917,8 +2001,9 @@ func TestHistoryBackAndForward(t *testing.T) {
 	h.key(tcell.KeyEnter)
 	h.waitFor("dn: uid=jdoe,ou=People,dc=example,dc=com")
 
-	// From the user, follow memberOf back to the group — a second jump.
-	h.key(tcell.KeyTab)
+	// From the user, follow memberOf back to the group — a second jump. No tab
+	// this time: arriving already leaves the object pane focused, which is the
+	// point of landing there.
 	h.selectValueRow("cn=engineers,ou=Groups,dc=example,dc=com")
 	h.key(tcell.KeyEnter)
 	h.waitFor("dn: cn=engineers,ou=Groups,dc=example,dc=com")
