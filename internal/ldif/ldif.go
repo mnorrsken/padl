@@ -30,6 +30,17 @@ func WriteEntry(w io.Writer, e *ldapx.Entry) error {
 		if a.Operational {
 			continue
 		}
+		// A name that is not an AttributeDescription cannot be written at all:
+		// one holding a newline or a colon would inject records into the file
+		// rather than describe an attribute. Nothing stops a directory from
+		// returning one, so say in the file that it was dropped instead of
+		// letting it through or losing it silently.
+		if !safeAttrName(a.Name) {
+			if _, err := io.WriteString(w, Comment("skipped attribute with an unusable name: %q", a.Name)); err != nil {
+				return err
+			}
+			continue
+		}
 		for _, v := range a.Values {
 			if err := writeAttr(w, a.Name, v); err != nil {
 				return err
@@ -70,10 +81,41 @@ func writeAttr(w io.Writer, name string, value []byte) error {
 	return err
 }
 
+// safeAttrName reports whether name can be written as an LDIF
+// AttributeDescription: an attribute type — letters, digits and hyphens, or a
+// dotted OID — followed by any number of ";options".
+//
+// The check is on the character set rather than the full RFC 4512 grammar,
+// because what matters here is that nothing in the name can end a line or start
+// a new field.
+func safeAttrName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, part := range strings.Split(name, ";") {
+		if part == "" {
+			return false
+		}
+		for i := 0; i < len(part); i++ {
+			switch c := part[i]; {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // needsBase64 reports whether a value has to be encoded rather than written
 // literally. RFC 2849 requires it for anything that is not SAFE-STRING: values
 // that are not valid UTF-8, contain NUL, LF or CR, start with a space, colon or
 // less-than, or end with a space.
+//
+// Control bytes beyond those three are encoded as well, though the format does
+// not demand it. A DN comes through here too, and a directory is free to put an
+// escape sequence in one; an LDIF that is copied to the clipboard and pasted
+// into a terminal should not carry it.
 func needsBase64(v []byte) bool {
 	if len(v) == 0 {
 		return false
@@ -89,7 +131,7 @@ func needsBase64(v []byte) bool {
 		return true
 	}
 	for _, c := range v {
-		if c == 0x00 || c == '\n' || c == '\r' {
+		if c < 0x20 || c == 0x7f {
 			return true
 		}
 		// Anything outside printable ASCII is safest encoded; a bare high byte

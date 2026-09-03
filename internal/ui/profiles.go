@@ -35,7 +35,7 @@ func profileList(profiles []config.Profile, act profileListActions) tview.Primit
 		p := profiles[i]
 		// Escaped: tview reads square brackets in list text as style tags, and a
 		// bind DN is free to contain them.
-		list.AddItem(tview.Escape(p.Display()), tview.Escape(profileSummary(p)), 0,
+		list.AddItem(escape(p.Display()), escape(profileSummary(p)), 0,
 			func() { act.connect(p) })
 	}
 
@@ -135,7 +135,7 @@ func profileForm(p config.Profile, isNew bool, onSave func(config.Profile), onCa
 	hint := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
 	hint.SetBackgroundColor(colorBackground)
 	setHint := func(color tcell.Color, format string, args ...any) {
-		hint.SetText(fmt.Sprintf("[%s]%s[-]", tag(color), tview.Escape(fmt.Sprintf(format, args...))))
+		hint.SetText(fmt.Sprintf("[%s]%s[-]", tag(color), escape(fmt.Sprintf(format, args...))))
 	}
 	setHint(colorDim, "The bind DN is a full DN, e.g. uid=admin,ou=people,dc=example,dc=com.")
 

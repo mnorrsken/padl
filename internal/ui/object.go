@@ -111,7 +111,7 @@ func (o *objectPane) clear(reason string) {
 	o.entry = nil
 	o.rows = nil
 	o.table.Clear()
-	o.header.SetText(fmt.Sprintf("[%s]%s[-]", tag(colorDim), tview.Escape(reason)))
+	o.header.SetText(fmt.Sprintf("[%s]%s[-]", tag(colorDim), escape(reason)))
 }
 
 // setBusy shows what is being loaded while the read is in flight.
@@ -119,7 +119,7 @@ func (o *objectPane) setBusy(dn string) {
 	o.table.Clear()
 	o.rows = nil
 	o.header.SetText(fmt.Sprintf("[%s]%s[-]\n[%s]loading…[-]",
-		tag(colorAccent), tview.Escape(dn), tag(colorDim)))
+		tag(colorAccent), escape(dn), tag(colorDim)))
 }
 
 // show renders an entry.
@@ -127,7 +127,7 @@ func (o *objectPane) show(e *ldapx.Entry) {
 	o.entry = e
 	o.rows = buildRows(e, o.bases)
 
-	o.header.SetText(fmt.Sprintf("[%s]dn:[-] %s", tag(colorAttrName), tview.Escape(e.DN)))
+	o.header.SetText(fmt.Sprintf("[%s]dn:[-] %s", tag(colorAttrName), escape(e.DN)))
 
 	o.table.Clear()
 	o.table.SetCell(0, 0, headerCell("Attribute"))
@@ -144,7 +144,7 @@ func (o *objectPane) show(e *ldapx.Entry) {
 		if r.operational {
 			nameColor = colorDim
 		}
-		o.table.SetCell(row, 0, tview.NewTableCell(tview.Escape(name)).
+		o.table.SetCell(row, 0, tview.NewTableCell(escape(name)).
 			SetTextColor(nameColor).
 			SetSelectable(true).
 			SetMaxWidth(28))
@@ -167,7 +167,7 @@ func (o *objectPane) show(e *ldapx.Entry) {
 		if r.operational && r.link != "" {
 			valueColor = colorDim
 		}
-		o.table.SetCell(row, 1, tview.NewTableCell(tview.Escape(oneLine(r.value.Text))).
+		o.table.SetCell(row, 1, tview.NewTableCell(escape(oneLine(r.value.Text))).
 			SetTextColor(valueColor).
 			SetAttributes(attrs).
 			SetSelectable(true).

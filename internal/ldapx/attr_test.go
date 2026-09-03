@@ -107,6 +107,14 @@ func TestFormatTextAndBinaryFallback(t *testing.T) {
 	if got := Format("description", []byte{0x01, 0x02, 0x03}); !got.Binary {
 		t.Errorf("control bytes = %+v, want binary", got)
 	}
+	// An escape sequence is valid UTF-8 and would be obeyed by the terminal.
+	if got := Format("description", []byte("\x1b[2J")); !got.Binary {
+		t.Errorf("escape sequence = %+v, want binary", got)
+	}
+	// U+009B is the eight-bit CSI: valid UTF-8, two bytes, neither below 0x20.
+	if got := Format("description", []byte("\u009b2J")); !got.Binary {
+		t.Errorf("eight-bit CSI = %+v, want binary", got)
+	}
 	// Invalid UTF-8 is binary regardless of the attribute name.
 	if got := Format("description", []byte{0xff, 0xfe, 0xfd}); !got.Binary {
 		t.Errorf("invalid utf-8 = %+v, want binary", got)
@@ -128,5 +136,34 @@ func TestFormatTextAndBinaryFallback(t *testing.T) {
 	}
 	if got := Format("userCertificate", []byte{0x00}); got.Text != "<binary, 1 byte>" {
 		t.Errorf("singular byte count = %q", got.Text)
+	}
+}
+
+// A DN never goes through Format, so SafeText is the only thing between a
+// directory and the terminal.
+func TestSafeText(t *testing.T) {
+	unchanged := []string{
+		"",
+		"uid=jdoe,ou=People,dc=example,dc=com",
+		"cn=Jörg Müller,dc=example,dc=com",
+		"cn=one\ttwo,dc=x",
+	}
+	for _, s := range unchanged {
+		if got := SafeText(s); got != s {
+			t.Errorf("SafeText(%q) = %q, want it left alone", s, got)
+		}
+	}
+
+	cases := map[string]string{
+		"cn=\x1b[2Jx,dc=y":   "cn=�[2Jx,dc=y",
+		"cn=\u009b2Jx,dc=y":  "cn=�2Jx,dc=y",
+		"cn=a\x07b,dc=y":     "cn=a�b,dc=y",
+		"cn=a\x7fb,dc=y":     "cn=a�b,dc=y",
+		"cn=one\r\ntwo,dc=y": "cn=one\r\ntwo,dc=y",
+	}
+	for in, want := range cases {
+		if got := SafeText(in); got != want {
+			t.Errorf("SafeText(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

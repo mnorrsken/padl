@@ -120,13 +120,58 @@ func FormatAll(a Attribute) []Value {
 // hasControlBytes catches values that are valid UTF-8 but still not something
 // to paste into a terminal. Tab, newline and carriage return are allowed
 // through because plenty of legitimate text attributes contain them.
+//
+// Only ever called on valid UTF-8, so ranging over runes is safe — and it has
+// to be runes rather than bytes to catch the C1 block below.
 func hasControlBytes(b []byte) bool {
-	for _, c := range b {
-		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+	for _, r := range string(b) {
+		if isControlRune(r) {
 			return true
 		}
 	}
 	return false
+}
+
+// isControlRune reports whether r is something a terminal acts on rather than
+// draws.
+//
+// C0 and DEL are the obvious half. The C1 block, U+0080 to U+009F, is the half
+// that is easy to miss: it is perfectly valid UTF-8, so a byte-wise check waves
+// it through, but U+009B is the eight-bit form of CSI and terminals in UTF-8
+// mode do act on it.
+func isControlRune(r rune) bool {
+	switch r {
+	case '\t', '\n', '\r':
+		return false
+	}
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f)
+}
+
+// SafeText makes a server-supplied string safe to draw, replacing every control
+// rune with U+FFFD.
+//
+// Attribute values go through Format, which turns anything with a control rune
+// in it into a hex dump. DNs and attribute names have no such stage: they are
+// drawn as they came off the wire, and nothing in LDAP stops a directory from
+// putting an escape sequence in one.
+//
+// This is a second line rather than the only one. tview drops zero-width
+// grapheme clusters — which is every control rune — before they ever reach
+// tcell, so today an escape sequence in a DN is discarded on the way to the
+// screen. That is an implementation detail of tview's draw loop, not something
+// it promises, and PADL should not be relying on a dependency's rendering
+// internals to decide what a hostile directory can put on the terminal. Making
+// it explicit also makes the mangling visible instead of silent.
+func SafeText(s string) string {
+	if !strings.ContainsFunc(s, isControlRune) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControlRune(r) {
+			return '�'
+		}
+		return r
+	}, s)
 }
 
 func describeBinary(raw []byte) string {

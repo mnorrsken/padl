@@ -125,7 +125,7 @@ func (s *searchBar) render() {
 	}
 	s.info.SetText(fmt.Sprintf("[%s]scope[-] %s  [%s]under[-] %s   %s",
 		tag(colorAttrName), s.scope,
-		tag(colorAttrName), tview.Escape(base),
+		tag(colorAttrName), escape(base),
 		s.preview()))
 }
 
@@ -142,7 +142,7 @@ func (s *searchBar) preview() string {
 		return fmt.Sprintf("[%s]raw filter, sent as typed[-]", tag(colorAccent))
 	}
 
-	attrs := tview.Escape(strings.Join(ldapx.QuickSearchAttributes(s.vendor), " "))
+	attrs := escape(strings.Join(ldapx.QuickSearchAttributes(s.vendor), " "))
 	switch terms := len(strings.Fields(text)); {
 	case terms == 0:
 		// Which attributes a bare-word search covers is worth knowing before
@@ -281,7 +281,7 @@ func (r *resultsPane) show(q ldapx.Query, page *ldapx.Page, appendPage bool) {
 	for i := range page.Entries {
 		e := page.Entries[i]
 		dn := e.DN
-		r.AddItem(tview.Escape(resultLabel(&e)), "", 0, func() {
+		r.AddItem(escape(resultLabel(&e)), "", 0, func() {
 			if r.chosen != nil {
 				r.chosen(dn)
 			}
@@ -299,7 +299,7 @@ func (r *resultsPane) show(q ldapx.Query, page *ldapx.Page, appendPage bool) {
 		r.AddItem(fmt.Sprintf("%s first %d only (no paging)", iconMore, len(r.entries)), "", 0, nil)
 	}
 
-	r.SetTitle(fmt.Sprintf(" %d for %s ", len(r.entries), tview.Escape(q.Title())))
+	r.SetTitle(fmt.Sprintf(" %d for %s ", len(r.entries), escape(q.Title())))
 	if len(r.entries) == 0 {
 		r.AddItem("nothing matched", "", 0, nil)
 	}

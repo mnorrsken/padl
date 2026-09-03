@@ -667,6 +667,33 @@ func TestTreeLabelsSurviveTviewTagParsing(t *testing.T) {
 	}
 }
 
+// Nothing in LDAP stops a directory from putting an escape sequence in a DN,
+// and a hostile server must not be able to repaint the terminal through a name
+// PADL displays.
+//
+// Two things keep that from happening — escape() strips control runes, and
+// tview drops them again when it draws — so this passes with either one alone.
+// It is here to catch the day one of them stops being true.
+func TestTreeLabelsCannotCarryTerminalEscapes(t *testing.T) {
+	d := sampleDir()
+	base := "dc=example,dc=com"
+	hostile := "cn=\x1b[2J\u009b6nevil," + base
+	d.children[base] = append(d.children[base], newEntry(hostile, attr("objectClass", "device")))
+	d.entries[hostile] = ptr(newEntry(hostile, attr("objectClass", "device")))
+
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("evil")
+
+	for _, r := range h.text() {
+		if r == '\n' {
+			continue
+		}
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			t.Fatalf("control rune %#U reached the screen:\n%q", r, h.text())
+		}
+	}
+}
+
 func TestContainersSortAboveLeaves(t *testing.T) {
 	d := sampleDir()
 	base := "dc=example,dc=com"

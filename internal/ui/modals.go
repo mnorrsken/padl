@@ -68,16 +68,16 @@ func certPrompt(cte *ldapx.CertTrustError, onAccept, onReject func()) tview.Prim
 		title = " CERTIFICATE CHANGED "
 		border = colorError
 		fmt.Fprintf(&b, "[%s]The certificate for %s has changed since you trusted it.[-]\n",
-			tag(colorError), tview.Escape(cte.Host))
+			tag(colorError), escape(cte.Host))
 		fmt.Fprintf(&b, "[%s]If nobody replaced it on purpose, stop and find out why.[-]\n\n",
 			tag(colorError))
 	} else {
 		fmt.Fprintf(&b, "[%s]%s could not be verified against the system trust store.[-]\n\n",
-			tag(colorWarn), tview.Escape(cte.Host))
+			tag(colorWarn), escape(cte.Host))
 	}
 
 	row := func(label, value string) {
-		fmt.Fprintf(&b, "[%s]%-12s[-] %s\n", tag(colorAttrName), label, tview.Escape(value))
+		fmt.Fprintf(&b, "[%s]%-12s[-] %s\n", tag(colorAttrName), label, escape(value))
 	}
 	row("Subject", cte.Subject)
 	row("Issuer", cte.Issuer)
@@ -104,7 +104,7 @@ func certPrompt(cte *ldapx.CertTrustError, onAccept, onReject func()) tview.Prim
 		fmt.Fprintf(&b, "\n[%s]This certificate is outside its validity window.[-]\n", tag(colorError))
 	}
 	if cte.VerifyErr != nil {
-		fmt.Fprintf(&b, "\n[%s]%s[-]\n", tag(colorDim), tview.Escape(cte.VerifyErr.Error()))
+		fmt.Fprintf(&b, "\n[%s]%s[-]\n", tag(colorDim), escape(cte.VerifyErr.Error()))
 	}
 	fmt.Fprintf(&b, "\nCompare the SHA-256 with what the directory admin published before trusting it.")
 
@@ -159,9 +159,9 @@ func passwordPrompt(profileName, bindDN, note string, canSave bool, onSubmit fun
 	info := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
 	info.SetBackgroundColor(colorBackground)
 	var b strings.Builder
-	fmt.Fprintf(&b, "[%s]bind dn:[-] %s\n", tag(colorAttrName), tview.Escape(bindDN))
+	fmt.Fprintf(&b, "[%s]bind dn:[-] %s\n", tag(colorAttrName), escape(bindDN))
 	if note != "" {
-		fmt.Fprintf(&b, "[%s]%s[-]\n", tag(colorWarn), tview.Escape(note))
+		fmt.Fprintf(&b, "[%s]%s[-]\n", tag(colorWarn), escape(note))
 	}
 	info.SetText(b.String())
 
@@ -277,7 +277,7 @@ func bookmarkList(profileName string, dns []string, onChoose func(string), onDel
 
 	for _, dn := range dns {
 		target := dn
-		list.AddItem(tview.Escape(dn), "", 0, func() { onChoose(target) })
+		list.AddItem(escape(dn), "", 0, func() { onChoose(target) })
 	}
 	if len(dns) == 0 {
 		list.AddItem("No bookmarks yet", "", 0, nil)
@@ -299,7 +299,7 @@ func bookmarkList(profileName string, dns []string, onChoose func(string), onDel
 	})
 
 	list.SetBorder(true).
-		SetTitle(fmt.Sprintf(" Bookmarks — %s · enter go · d delete · esc close ", tview.Escape(profileName))).
+		SetTitle(fmt.Sprintf(" Bookmarks — %s · enter go · d delete · esc close ", escape(profileName))).
 		SetTitleColor(colorTitle).
 		SetBorderColor(colorBorder).
 		SetBackgroundColor(colorBackground)
@@ -322,7 +322,7 @@ func promptBox(title, label, value, hint string, onSubmit func(string), onCancel
 	info := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
 	info.SetBackgroundColor(colorBackground)
 	if hint != "" {
-		info.SetText(fmt.Sprintf("[%s]%s[-]", tag(colorDim), tview.Escape(hint)))
+		info.SetText(fmt.Sprintf("[%s]%s[-]", tag(colorDim), escape(hint)))
 	}
 
 	frame := tview.NewFlex().SetDirection(tview.FlexRow).

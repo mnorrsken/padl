@@ -149,9 +149,9 @@ func (t *tree) toggle(n *tview.TreeNode) {
 // reset clears the tree back to a set of naming contexts.
 func (t *tree) reset(bases []string, title string) {
 	t.root.ClearChildren()
-	t.SetTitle(fmt.Sprintf(" %s ", tview.Escape(title)))
+	t.SetTitle(fmt.Sprintf(" %s ", escape(title)))
 	for _, dn := range bases {
-		n := newNode(tview.Escape(fmt.Sprintf("%s %s", iconRoot, dn)), colorAccent).
+		n := newNode(escape(fmt.Sprintf("%s %s", iconRoot, dn)), colorAccent).
 			SetReference(&node{kind: nodeBase, dn: dn}).
 			SetSelectable(true)
 		t.root.AddChild(n)
@@ -166,7 +166,7 @@ func (t *tree) reset(bases []string, title string) {
 // clear empties the tree, for the disconnected state.
 func (t *tree) clear(title string) {
 	t.root.ClearChildren()
-	t.SetTitle(fmt.Sprintf(" %s ", tview.Escape(title)))
+	t.SetTitle(fmt.Sprintf(" %s ", escape(title)))
 	t.SetCurrentNode(t.root)
 }
 
@@ -280,7 +280,7 @@ func entryLabel(e *ldapx.Entry) string {
 	if e.Subordinates > 0 {
 		label += fmt.Sprintf(" (%d)", e.Subordinates)
 	}
-	return tview.Escape(label)
+	return escape(label)
 }
 
 func entryColor(e *ldapx.Entry) tcell.Color {

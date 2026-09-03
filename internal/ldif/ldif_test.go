@@ -81,6 +81,54 @@ func TestNeedsBase64(t *testing.T) {
 	if !needsBase64([]byte{0xff, 0xfe}) {
 		t.Error("invalid UTF-8 must be base64-encoded")
 	}
+
+	// An escape sequence must not survive into a file that gets pasted into a
+	// terminal, whichever field it arrived in.
+	if !needsBase64([]byte("hello\x1b[2Jworld")) {
+		t.Error("an escape sequence must be base64-encoded")
+	}
+}
+
+func TestSafeAttrName(t *testing.T) {
+	ok := []string{"cn", "objectClass", "userCertificate;binary", "x-my-attr", "1.2.840.113556.1.4.319"}
+	for _, name := range ok {
+		if !safeAttrName(name) {
+			t.Errorf("%q is a usable attribute name", name)
+		}
+	}
+
+	bad := []string{"", "cn;", "cn: x", "cn\nobjectClass", "cn value", "cn\x1b[2J"}
+	for _, name := range bad {
+		if safeAttrName(name) {
+			t.Errorf("%q must not be written as an attribute name", name)
+		}
+	}
+}
+
+// A directory is free to answer with an attribute name that is not an
+// AttributeDescription. Writing it out would put whatever it contains on a line
+// of its own, which is how an export turns into extra records.
+func TestAttributeNameCannotInjectRecords(t *testing.T) {
+	e := &ldapx.Entry{
+		DN: "cn=x,dc=y",
+		Attributes: []ldapx.Attribute{
+			attr("cn", "x"),
+			attr("description\ndn: cn=evil,dc=y\nobjectClass", "top"),
+		},
+	}
+
+	got := String(e)
+	if strings.Contains(got, "cn=evil") && !strings.Contains(got, `# skipped`) {
+		t.Fatalf("the injected record was written out:\n%s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "dn:") && !strings.HasPrefix(line, "dn: cn=x,dc=y") {
+			t.Errorf("a second dn line appeared: %q", line)
+		}
+	}
+	if !strings.Contains(got, "# skipped attribute with an unusable name") {
+		t.Errorf("the drop should be recorded in the file:\n%s", got)
+	}
 }
 
 func TestBase64ValuesRoundTrip(t *testing.T) {

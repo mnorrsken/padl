@@ -832,8 +832,8 @@ func (a *App) renderHeader() {
 		contexts = fmt.Sprintf("  [%s](a: show all contexts)[-]", tag(colorDim))
 	}
 	a.header.SetText(fmt.Sprintf("[%s]PADL[-]  %s  [%s]%s[-]  [%s]%s[-]%s",
-		tag(colorAccent), tview.Escape(a.profile.Display()),
-		tag(colorDim), tview.Escape(a.profile.URL()),
+		tag(colorAccent), escape(a.profile.Display()),
+		tag(colorDim), escape(a.profile.URL()),
 		tag(colorOK), a.vendor.String(),
 		contexts))
 }

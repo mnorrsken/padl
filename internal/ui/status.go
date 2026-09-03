@@ -63,7 +63,7 @@ func (s *statusBar) render() {
 	if s.spinner != "" {
 		prefix = fmt.Sprintf("[%s]%s[-] ", tag(colorAccent), s.spinner)
 	}
-	s.line.SetText(fmt.Sprintf("%s[%s]%s[-]", prefix, tag(s.color), tview.Escape(s.message)))
+	s.line.SetText(fmt.Sprintf("%s[%s]%s[-]", prefix, tag(s.color), escape(s.message)))
 }
 
 // tag renders a colour as a tview colour tag. The terminal default has no name,

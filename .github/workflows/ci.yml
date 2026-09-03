@@ -8,6 +8,11 @@ on:
 # Tags are covered by release.yml, which runs the same checks before it
 # publishes anything — running CI on them as well is duplicate work.
 
+# Nothing here writes to the repository, so the token does not need to be able
+# to. Without this the job would inherit whatever the repository default is.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test on ${{ matrix.os }}
