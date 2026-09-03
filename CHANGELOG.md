@@ -2,6 +2,18 @@
 
 All notable changes to PADL.
 
+## [0.8.0] - 2026-09-03
+
+### Added
+- **`DirXML-PasswordSyncStatus` decoded** — the NetIQ Identity Manager
+  attribute you read when a new password works in one connected system and
+  not another. Raw it is sixty-odd characters of fixed-width fields run
+  together with nothing between them; it now shows the outcome (ERROR,
+  WARNING, RETRY, FATAL, SUCCESS or PENDING), when it happened, the server's
+  message and the driver it came from. Fan-Out drivers, which add an
+  instance GUID, are handled too. The timestamp is reformatted where it
+  stands rather than converted, because the field carries no zone.
+
 ## [0.7.0] - 2026-09-03
 
 ### Added
