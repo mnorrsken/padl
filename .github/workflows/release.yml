@@ -167,7 +167,7 @@ jobs:
           done
 
       - name: Fetch the Windows installers
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: installers
           path: dist
