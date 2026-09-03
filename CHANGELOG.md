@@ -2,6 +2,57 @@
 
 All notable changes to PADL.
 
+## [0.7.0] - 2026-09-03
+
+### Added
+- **Attribute decoding across Active Directory, Exchange, eDirectory and NetIQ
+  Identity Manager** — about eighty attributes. GUIDs and SIDs unpacked, flag
+  words named (`userAccountControl`, `groupType`, `systemFlags`,
+  `msDS-SupportedEncryptionTypes`), enumerations named (`sAMAccountType`,
+  Exchange recipient types, forest/domain functional levels), FILETIME and
+  generalizedTime stamps rendered in local time, the AD password policy's
+  negative FILETIME intervals shown as durations, `proxyAddresses` labelled
+  primary or alias, eDirectory ACLs unpacked into the rights they grant over
+  what to whom, DirXML-Associations split into driver, state and key. A value
+  PADL cannot make sense of is shown as it arrived rather than guessed at.
+- **An Active Directory domain in `make lab`** — a Samba DC, provisioned and
+  seeded — so the AD-specific paths are covered by `make it` for the first
+  time. Six integration tests.
+- **`make lab-profiles`**: starts every lab server and adds a profile for each
+  to your own PADL config and keychain, so the lab can be browsed by hand.
+  `make lab-profiles-rm` removes them. eDirectory joins through
+  `dev/lab-edir.sh` and a gitignored `dev/edir.env`.
+
+### Changed
+- **Quick search matches login identifiers** (`uid`, `sAMAccountName`) as
+  typed rather than by prefix — the wildcard added no recall, since the same
+  entry's `cn` or `displayName` matches the same prefix, and cost a substring
+  scan on the attribute most likely to be indexed for equality. A single
+  search term shorter than two characters is also matched as typed: one
+  letter by prefix is the whole directory. A wildcard the user typed always
+  wins. The search bar says which kind of match is coming.
+- **The bind name is sent to the server as typed.** PADL used to require it to
+  parse as a DN, which refused the two ways most people log in to Active
+  Directory — `administrator@ad.example.com` and `AD\Administrator` — before
+  dialling. Only the server knows which names it takes.
+- **Following a link lands on the entry's attributes** rather than on the
+  tree. Bookmarking (`b`) now works from the object pane too.
+
+### Fixed
+- **An LDIF export or clipboard copy could carry an escape sequence out of a
+  hostile directory**: control bytes now force the base64 form, and an
+  attribute name that is not an AttributeDescription is dropped with a
+  comment rather than injecting records into the file.
+- **Values PADL renders are no longer mistaken for followable DNs.** An
+  eDirectory ACL renders as text ending in the trustee's DN, which parses as
+  one and is in the tree — enter now opens the value's details instead of
+  walking off to the trustee.
+- **The focused pane indicator in the key hints ("[tree]" / "[object]") has
+  never been visible**: the hints view had dynamic colours on, so tview read
+  it as an unknown colour tag and swallowed it.
+- **CI's `GITHUB_TOKEN` no longer inherits the repository default**;
+  `ci.yml` declares `contents: read`.
+
 ## [0.6.0] - 2026-09-01
 
 ### Added
