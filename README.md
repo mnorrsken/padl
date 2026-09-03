@@ -33,9 +33,9 @@ PADL  Lab  ldaps://ldap.example.com:636  OpenLDAP
   enumerations named (`sAMAccountType`, Exchange recipient types, forest and
   domain functional levels), timestamps in local time, password-policy intervals
   as durations, `proxyAddresses` labelled primary or alias, and
-  `DirXML-Associations` split into driver, state and key. Everything else is a
-  hex dump on demand. A value PADL cannot make sense of is shown as it arrived
-  rather than guessed at.
+  `DirXML-Associations` and `DirXML-PasswordSyncStatus` unpacked into their
+  fields. Everything else is a hex dump on demand, and a value PADL cannot make
+  sense of is shown as it arrived rather than guessed at.
 - **Followable DNs**: press enter on a `member`, `memberOf`, `manager` — any value
   holding a DN, shown underlined — and you land on that entry's attributes, with
   the tree opening whatever is closed on the way and paging into large containers
@@ -187,8 +187,10 @@ server that has the entry. The bar always shows which attributes it will search.
   Verified against 9.3.3; see [docs/manual-tests.md](docs/manual-tests.md).
 - **NetIQ Identity Manager** — `DirXML-Associations` is split into the driver,
   the association state and the key the connected system knows the object by,
-  which is the value you read first when something is not syncing. Written from
-  the documentation and not yet run against a live IDM.
+  and `DirXML-PasswordSyncStatus` into the outcome, when it happened, the
+  server's message and the driver it came from — the two values you read first
+  when something is not syncing. Written from the documentation and not yet run
+  against a live IDM.
 - **OpenLDAP** — recognised from its root DSE, which carries no `vendorName`.
 - **lldap** — accepts only `uid=<id>,ou=people,<base>` as a bind DN, and answers
   a one-level search at the root with the whole subtree. PADL rebuilds the real

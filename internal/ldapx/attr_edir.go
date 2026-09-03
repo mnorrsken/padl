@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // eDirectory and NetIQ Identity Manager attribute rendering.
@@ -135,10 +136,141 @@ func formatEDirectoryACL(s string) (string, bool) {
 // worth having: it is the first thing anybody looks at when an object is not
 // syncing, and raw it is three fields run together with no clue which is which.
 var idmRenderings = map[string]rendering{
-	"dirxml-associations":      decodeText(formatDirXMLAssociation),
-	"dirxml-state":             decodeText(enumeration(dirXMLAssociationStates)),
-	"dirxml-driverstartoption": decodeText(enumeration(dirXMLStartOptions)),
-	"dirxml-drivertracelevel":  decodeText(enumeration(dirXMLTraceLevels)),
+	"dirxml-associations":       decodeText(formatDirXMLAssociation),
+	"dirxml-state":              decodeText(enumeration(dirXMLAssociationStates)),
+	"dirxml-driverstartoption":  decodeText(enumeration(dirXMLStartOptions)),
+	"dirxml-drivertracelevel":   decodeText(enumeration(dirXMLTraceLevels)),
+	"dirxml-passwordsyncstatus": decodeText(formatDirXMLPasswordSyncStatus),
+}
+
+// DirXML-PasswordSyncStatus records what happened the last time a password
+// change was pushed to a driver. It is the attribute you read when somebody
+// says their new password works in one system and not another, and raw it is a
+// run of sixty-odd characters with no separators at all:
+//
+//	39DB7DED8436EE4DF38039DB7DED843620140325141422721000000000001Code(-8032) Operation vetoed by policy
+//
+// Fixed-width fields, in order: 32 characters of driver GUID, 17 of timestamp
+// as yyyyMMddHHmmssSSS, 8 of zeroes, a 4-digit status code, then the message if
+// there is one. A Fan-Out driver appends the instance GUID after the driver's,
+// which is why the value is 93 characters there rather than 61.
+//
+// Source: NetIQ Identity Manager Password Management Guide, "Checking the
+// Password Synchronization Status for a User". The example above is theirs and
+// is pinned as a test.
+var dirXMLPasswordSyncStatuses = map[string]string{
+	"0000": "ERROR",
+	"0001": "WARNING",
+	"0002": "RETRY",
+	"0003": "FATAL",
+	"0004": "SUCCESS",
+	"0005": "PENDING",
+}
+
+const (
+	syncStatusGUIDLen = 32
+	syncStatusTimeLen = 17
+	syncStatusPadLen  = 8
+	syncStatusCodeLen = 4
+)
+
+// formatDirXMLPasswordSyncStatus renders one status value.
+//
+// The ordinary and Fan-Out layouts differ only by a second GUID, and nothing in
+// the value says which it is, so both are tried. Confusing them is close to
+// impossible in practice: either reading has to yield a timestamp that is a
+// real date and a status code that is one of the six, and a GUID's first
+// seventeen characters are hex rather than digits.
+func formatDirXMLPasswordSyncStatus(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	for _, guids := range []int{1, 2} {
+		if text, ok := parsePasswordSyncStatus(s, guids); ok {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+func parsePasswordSyncStatus(s string, guids int) (string, bool) {
+	if len(s) < guids*syncStatusGUIDLen+syncStatusTimeLen+syncStatusPadLen+syncStatusCodeLen {
+		return "", false
+	}
+
+	off := 0
+	ids := make([]string, 0, guids)
+	for i := 0; i < guids; i++ {
+		id := s[off : off+syncStatusGUIDLen]
+		if !isHex(id) {
+			return "", false
+		}
+		ids = append(ids, id)
+		off += syncStatusGUIDLen
+	}
+
+	when, ok := parseSyncStatusTime(s[off : off+syncStatusTimeLen])
+	if !ok {
+		return "", false
+	}
+	off += syncStatusTimeLen
+
+	// Documented as eight zeroes. Requiring digits rather than zeroes exactly
+	// leaves room for a field that turns out to mean something, while keeping
+	// the signature strong enough that ordinary text cannot match it.
+	if !isDigits(s[off : off+syncStatusPadLen]) {
+		return "", false
+	}
+	off += syncStatusPadLen
+
+	status, ok := dirXMLPasswordSyncStatuses[s[off:off+syncStatusCodeLen]]
+	if !ok {
+		return "", false
+	}
+	off += syncStatusCodeLen
+
+	out := []string{status, when}
+	if message := strings.TrimSpace(s[off:]); message != "" {
+		out = append(out, message)
+	}
+	out = append(out, "driver "+ids[0])
+	if len(ids) > 1 {
+		out = append(out, "instance "+ids[1])
+	}
+	return strings.Join(out, " · "), true
+}
+
+// parseSyncStatusTime reformats yyyyMMddHHmmssSSS without moving it.
+//
+// The field carries no zone and the documentation does not say which one it is
+// in, so converting to local time would shift a timestamp by a guess. The
+// digits are shown back as they arrived, only readable.
+func parseSyncStatusTime(s string) (string, bool) {
+	if !isDigits(s) {
+		return "", false
+	}
+	t, err := time.Parse("20060102150405.000", s[:14]+"."+s[14:])
+	if err != nil {
+		return "", false
+	}
+	return t.Format("2006-01-02 15:04:05.000"), true
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // dirXMLAssociationStates are the association states an object can be in with a

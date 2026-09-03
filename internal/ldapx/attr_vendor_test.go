@@ -406,6 +406,83 @@ func TestDirXMLAssociations(t *testing.T) {
 	}
 }
 
+// DirXML-PasswordSyncStatus is what you read when a new password works in one
+// connected system and not another, and raw it is sixty-odd characters of
+// fixed-width fields run together with no separators.
+func TestDirXMLPasswordSyncStatus(t *testing.T) {
+	// NetIQ's own worked example, from the Password Management Guide.
+	documented := "39DB7DED8436EE4DF38039DB7DED843620140325141422721000000000001Code(-8032) Operation vetoed by policy"
+	want := "WARNING · 2014-03-25 14:14:22.721 · Code(-8032) Operation vetoed by policy · driver 39DB7DED8436EE4DF38039DB7DED8436"
+	if got := render("DirXML-PasswordSyncStatus", documented); got != want {
+		t.Errorf("documented example =\n  %q\nwant\n  %q", got, want)
+	}
+
+	guid := "39DB7DED8436EE4DF38039DB7DED8436"
+	stamp := "20260903101530500"
+	value := func(code, message string) string { return guid + stamp + "00000000" + code + message }
+
+	codes := map[string]string{
+		"0000": "ERROR", "0001": "WARNING", "0002": "RETRY",
+		"0003": "FATAL", "0004": "SUCCESS", "0005": "PENDING",
+	}
+	for code, name := range codes {
+		got := render("DirXML-PasswordSyncStatus", value(code, ""))
+		want := name + " · 2026-09-03 10:15:30.500 · driver " + guid
+		if got != want {
+			t.Errorf("code %s = %q, want %q", code, got, want)
+		}
+	}
+
+	// A message is kept as the server wrote it.
+	if got := render("DirXML-PasswordSyncStatus", value("0005", "Driver not running")); got !=
+		"PENDING · 2026-09-03 10:15:30.500 · Driver not running · driver "+guid {
+		t.Errorf("with a message = %q", got)
+	}
+
+	// The timestamp carries no zone and the documentation does not say which one
+	// it is, so it is reformatted where it stands rather than shifted by a guess.
+	if got := render("DirXML-PasswordSyncStatus", value("0004", "")); !strings.Contains(got, "10:15:30.500") {
+		t.Errorf("the timestamp should read back unmoved, got %q", got)
+	}
+}
+
+// A Fan-Out driver puts its instance GUID after the driver's, which is the only
+// difference between the two layouts and why the value is 93 characters there.
+func TestDirXMLPasswordSyncStatusFanOut(t *testing.T) {
+	driver := "39DB7DED8436EE4DF38039DB7DED8436"
+	instance := "AABBCCDDEEFF00112233445566778899"
+	value := driver + instance + "20260903101530500" + "00000000" + "0004"
+	if len(value) != 93 {
+		t.Fatalf("the documented Fan-Out length is 93, this test's value is %d", len(value))
+	}
+
+	want := "SUCCESS · 2026-09-03 10:15:30.500 · driver " + driver + " · instance " + instance
+	if got := render("DirXML-PasswordSyncStatus", value); got != want {
+		t.Errorf("fan-out =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// Nothing that is not this shape may be reported as a sync result.
+func TestDirXMLPasswordSyncStatusLeavesAnythingElseAlone(t *testing.T) {
+	guid := "39DB7DED8436EE4DF38039DB7DED8436"
+	for _, in := range []string{
+		"nonsense",
+		"",
+		// A status code outside the six.
+		guid + "20260903101530500" + "00000000" + "0009" + "unknown",
+		// A timestamp that is not a date.
+		guid + "20261303101530500" + "00000000" + "0004",
+		// A driver GUID that is not hex.
+		"zzDB7DED8436EE4DF38039DB7DED8436" + "20260903101530500" + "00000000" + "0004",
+		// Too short to hold the fixed fields.
+		guid + "20260903101530500" + "0000",
+	} {
+		if got := render("DirXML-PasswordSyncStatus", in); got != in {
+			t.Errorf("%q = %q, want it left alone", in, got)
+		}
+	}
+}
+
 // Whatever the rendering, the bytes the directory sent are kept, because the
 // hex dump and any future "copy raw" read them rather than the text.
 func TestRenderedValuesKeepTheirRaw(t *testing.T) {
