@@ -31,8 +31,12 @@ do not show in tests.
 - `internal/version` is stamped from the git tag at build time. No version
   string in source.
 - Quick search splits the query into terms and builds
-  `&(|(cn=t*)(sAMAccountName=t*)...)` per term; keep that behaviour when
-  touching search.
+  `&(|(cn=t*)(sAMAccountName=t)...)` per term; keep that behaviour when
+  touching search. Two things are matched as typed rather than by prefix:
+  the login identifiers in `exactMatchAttributes` (`uid`, `sAMAccountName`),
+  and a single term shorter than `minWildcardTerm`. A wildcard the user typed
+  always wins. `ldapx.PrefixSearch` answers which kind of match a query gets,
+  so the search bar does not restate the rule.
 - `docs/tested-against.md` records what was verified against which directory.
   Update it when you test against a new server. `docs/windows.md` covers the
   Windows install and SmartScreen notes.

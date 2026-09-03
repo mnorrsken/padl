@@ -97,6 +97,83 @@ func TestQuickFilterHonoursTypedWildcards(t *testing.T) {
 	}
 }
 
+// A login identifier is known in full or not at all, and a prefix match on one
+// finds nothing the descriptive attributes in the same OR do not already find.
+func TestIdentifierAttributesAreMatchedExactly(t *testing.T) {
+	got := QuickFilterFor([]string{"martin"}, []string{"sAMAccountName", "cn", "uid", "mail"})
+	want := "(|(sAMAccountName=martin)(cn=martin*)(uid=martin)(mail=martin*))"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	// The lists spell these differently per vendor, so the lookup cannot be
+	// case-sensitive.
+	if got := QuickFilterFor([]string{"martin"}, []string{"samaccountname", "UID"}); got != "(|(samaccountname=martin)(UID=martin))" {
+		t.Errorf("case-folded names should match too: %q", got)
+	}
+
+	// Nobody is forced into an exact match: a wildcard the user typed wins.
+	if got := QuickFilterFor([]string{"mar*"}, []string{"uid"}); got != "(|(uid=mar*))" {
+		t.Errorf("a typed wildcard should survive on uid: %q", got)
+	}
+}
+
+// One letter matched by prefix returns the directory rather than an entry. A
+// second word narrows what the first left, so short terms are fine in company.
+func TestShortLoneTermIsNotWildcarded(t *testing.T) {
+	cases := map[string]string{
+		"a":   "(|(cn=a))",
+		"å":   "(|(cn=å))",
+		"ab":  "(|(cn=ab*))",
+		"mar": "(|(cn=mar*))",
+	}
+	for in, want := range cases {
+		if got := QuickFilterFor([]string{in}, []string{"cn"}); got != want {
+			t.Errorf("%q = %q, want %q", in, got, want)
+		}
+	}
+
+	// Two words, both short, are a real search: each one narrows the other.
+	if got := QuickFilterFor([]string{"a", "b"}, []string{"cn"}); got != "(&(|(cn=a*))(|(cn=b*)))" {
+		t.Errorf("two short terms = %q, want both wildcarded", got)
+	}
+
+	// A wildcard the user typed says they meant it, however short the word.
+	if got := QuickFilterFor([]string{"a*"}, []string{"cn"}); got != "(|(cn=a*))" {
+		t.Errorf("a typed wildcard should survive: %q", got)
+	}
+
+	// A term that escapes to nothing must not pad the count into a pair.
+	if got := QuickFilterFor([]string{"a", ""}, []string{"cn"}); got != "(|(cn=a))" {
+		t.Errorf("an empty term should not earn a wildcard: %q", got)
+	}
+}
+
+// The search bar tells the user which kind of match is about to run, so the
+// rule has to be answerable without building the filter.
+func TestPrefixSearchMatchesTheFilterItDescribes(t *testing.T) {
+	cases := map[string]bool{
+		"a":               false,
+		"  a  ":           false,
+		"a b":             true,
+		"ab":              true,
+		"martin":          true,
+		"":                false,
+		"(objectClass=*)": false,
+	}
+	for in, want := range cases {
+		if got := PrefixSearch(in); got != want {
+			t.Errorf("PrefixSearch(%q) = %v, want %v", in, got, want)
+		}
+		if !want {
+			continue
+		}
+		if filter := QuickFilter(in, VendorGeneric); !strings.Contains(filter, "*") {
+			t.Errorf("PrefixSearch(%q) said prefix, but %q has no wildcard", in, filter)
+		}
+	}
+}
+
 // Anything starting with "(" is the user writing a filter by hand, and must
 // reach the server exactly as typed.
 func TestRawFiltersPassThroughUntouched(t *testing.T) {

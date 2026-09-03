@@ -150,6 +150,12 @@ func (s *searchBar) preview() string {
 		return fmt.Sprintf("[%s]words match[-] %s", tag(colorDim), attrs)
 	case ldapx.QuickFilter(text, s.vendor) == "":
 		return fmt.Sprintf("[%s]nothing to search for[-]", tag(colorWarn))
+	case !ldapx.PrefixSearch(text):
+		// A single short word is matched as typed rather than by prefix, which
+		// is a different search from the one the field looks like it describes.
+		// Say so here: the alternative is an empty result and no clue why.
+		return fmt.Sprintf("[%s]as typed, not by prefix — add a word[-]  %s",
+			tag(colorWarn), attrs)
 	case terms == 1:
 		return fmt.Sprintf("[%s]any of[-] %s", tag(colorAttrName), attrs)
 	default:

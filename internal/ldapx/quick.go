@@ -3,6 +3,7 @@ package ldapx
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Quick search turns bare words into an LDAP filter: "mar nor" becomes every
@@ -10,6 +11,9 @@ import (
 // search by, with a trailing wildcard for prefix matching.
 //
 //	(&(|(cn=mar*)(sn=mar*)…)(|(cn=nor*)(sn=nor*)…))
+//
+// Two things are matched literally instead. A login identifier is one: see
+// exactMatchAttributes. A single short word is the other: see minWildcardTerm.
 //
 // The attribute list is per-vendor rather than one broad set, because a broad
 // one does not work. RFC 4511 says a filter naming an unknown attribute is
@@ -50,6 +54,33 @@ var lldapQuickAttributes = []string{
 	"uid", "cn", "mail", "displayName",
 }
 
+// exactMatchAttributes hold a login identifier rather than a description of a
+// person, and are matched as typed.
+//
+// A prefix match on one buys nothing. Anybody whose uid starts with "mar" has a
+// cn or a displayName that starts with it too, and those are in the same OR, so
+// the wildcard adds no entry the search would otherwise miss. What it costs is
+// real: a substring assertion cannot use an equality index, and these are the
+// attributes a directory is most certain to have indexed for equality. On a
+// large Active Directory that is the difference between a keystroke and a wait.
+//
+// A wildcard the user typed is still honoured — the point is not to force
+// anyone into an exact match, only to stop adding one nobody asked for.
+var exactMatchAttributes = map[string]bool{
+	"samaccountname": true,
+	"uid":            true,
+}
+
+// minWildcardTerm is how many runes a lone search term needs before it earns
+// the implicit trailing wildcard.
+//
+// One letter matched by prefix is not a search: it is the directory, arriving
+// one page at a time, and the entry being looked for is somewhere in it. Terms
+// are ANDed, so a second word narrows what the first left — which is why "a b"
+// is a reasonable search where "a" is not. Below the threshold the word is
+// matched as typed, so "a" still finds an entry actually named a.
+const minWildcardTerm = 2
+
 // QuickSearchAttributes returns the attributes a bare-word search looks in on
 // this kind of server.
 func QuickSearchAttributes(v Vendor) []string {
@@ -85,22 +116,35 @@ func QuickFilter(input string, v Vendor) string {
 	return QuickFilterFor(strings.Fields(input), QuickSearchAttributes(v))
 }
 
+// PrefixSearch reports whether a bare-word search of input matches by prefix
+// rather than as typed. The search bar has to say which one is about to happen,
+// and the rule belongs here rather than restated there.
+func PrefixSearch(input string) bool {
+	if IsRawFilter(input) {
+		return false
+	}
+	return prefixed(usableTerms(strings.Fields(input)))
+}
+
 // QuickFilterFor builds the filter for explicit terms and attributes.
 func QuickFilterFor(terms, attributes []string) string {
 	if len(attributes) == 0 {
 		return ""
 	}
 
-	var clauses []string
+	// Terms are reduced to the ones that survive escaping before the decision
+	// below, so a term that escapes to nothing cannot make a lone short word
+	// look like a pair and earn a wildcard it should not have.
+	terms = usableTerms(terms)
+	prefix := prefixed(terms)
+
+	clauses := make([]string, 0, len(terms))
 	for _, term := range terms {
-		value := wildcard(term)
-		if value == "" {
-			continue
-		}
+		value := escapeTerm(term)
 		var b strings.Builder
 		b.WriteString("(|")
 		for _, attr := range attributes {
-			fmt.Fprintf(&b, "(%s=%s)", attr, value)
+			fmt.Fprintf(&b, "(%s=%s)", attr, assertion(attr, value, prefix))
 		}
 		b.WriteString(")")
 		clauses = append(clauses, b.String())
@@ -118,17 +162,38 @@ func QuickFilterFor(terms, attributes []string) string {
 	}
 }
 
-// wildcard escapes a term and gives it a trailing "*" so it matches by prefix.
-// A term the user already wildcarded is left as they wrote it.
-func wildcard(term string) string {
-	escaped := escapeTerm(term)
-	if escaped == "" {
-		return ""
+// usableTerms drops the terms that carry nothing to search for.
+func usableTerms(terms []string) []string {
+	out := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if escapeTerm(term) != "" {
+			out = append(out, term)
+		}
 	}
-	if strings.Contains(escaped, "*") {
-		return escaped
+	return out
+}
+
+// prefixed decides whether this set of terms gets the implicit trailing
+// wildcard at all.
+func prefixed(terms []string) bool {
+	switch {
+	case len(terms) == 0:
+		return false
+	case len(terms) > 1:
+		return true
+	default:
+		return utf8.RuneCountInString(terms[0]) >= minWildcardTerm
 	}
-	return escaped + "*"
+}
+
+// assertion renders one attribute's half of a term: the escaped value, given a
+// trailing "*" only where prefix matching is both wanted and worth having.
+// A wildcard the user typed is left exactly as they wrote it.
+func assertion(attr, value string, prefix bool) string {
+	if !prefix || strings.Contains(value, "*") || exactMatchAttributes[lower(attr)] {
+		return value
+	}
+	return value + "*"
 }
 
 // escapeTerm escapes a search term for use as an RFC 4515 assertion value,

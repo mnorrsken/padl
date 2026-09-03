@@ -1826,6 +1826,30 @@ func TestQuickSearchPreviewsTheFilterItWillRun(t *testing.T) {
 	h.waitFor("raw filter, sent as typed")
 }
 
+// A lone short word is matched as typed rather than by prefix, which is a
+// narrower search than the field looks like it describes. The bar has to say so
+// while there is still time to add a word.
+func TestQuickSearchSaysWhenAWordIsTooShortToWildcard(t *testing.T) {
+	d := withGroup(sampleDir())
+	h := start(t, testProfile(), okConnector(d), nil)
+	h.waitFor("ou=People")
+
+	h.rune('/')
+	h.typeString("a")
+	h.waitFor("as typed, not by prefix")
+
+	// A second word makes it a real search again.
+	h.typeString(" b")
+	h.waitFor("all 2 words, each in any of")
+
+	// So does a longer one.
+	for i := 0; i < 3; i++ {
+		h.screen.InjectKey(tcell.KeyBackspace2, 0, tcell.ModNone)
+	}
+	h.typeString("bc")
+	h.waitFor("any of")
+}
+
 func TestQuickSearchFindsAnEntry(t *testing.T) {
 	d := withGroup(sampleDir())
 	h := start(t, testProfile(), okConnector(d), nil)
