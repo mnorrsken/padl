@@ -39,14 +39,22 @@ fmt: ## Format
 tidy: ## Tidy go.mod
 	go mod tidy
 
-lab: ## Start the throwaway directories (OpenLDAP + lldap) and wait for them
+lab: ## Start the throwaway directories (OpenLDAP + lldap + Samba AD) and wait for them
 	$(COMPOSE) up -d
 	@echo "waiting for the lab directories..."
-	@for c in padl-lab-openldap padl-lab-lldap; do \
-		until [ "$$(docker inspect --format='{{.State.Health.Status}}' $$c 2>/dev/null)" = "healthy" ]; do sleep 2; done; \
+	@for c in padl-lab-openldap padl-lab-lldap padl-lab-ad; do \
+		i=0; \
+		until [ "$$(docker inspect --format='{{.State.Health.Status}}' $$c 2>/dev/null)" = "healthy" ]; do \
+			i=$$((i + 1)); \
+			if [ $$i -gt 90 ]; then \
+				echo "$$c never became healthy; see: $(COMPOSE) logs $$c" >&2; exit 1; \
+			fi; \
+			sleep 2; \
+		done; \
 	done
 	@echo "openldap: ldap://127.0.0.1:13389  ldaps://127.0.0.1:13636"
 	@echo "lldap:    ldap://127.0.0.1:13390  (web ui on http://127.0.0.1:17170)"
+	@echo "samba ad: ldaps://127.0.0.1:13638  starttls://127.0.0.1:13392  (cleartext binds refused)"
 
 lab-down: ## Stop and delete the lab directories
 	$(COMPOSE) down -v

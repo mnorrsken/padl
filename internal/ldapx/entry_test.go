@@ -2,7 +2,6 @@ package ldapx
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -127,32 +126,5 @@ func TestApplySubordinateHints(t *testing.T) {
 	applySubordinateHints(&bare)
 	if bare.HasSubordinates != nil {
 		t.Errorf("silent server should leave HasSubordinates nil, got %v", *bare.HasSubordinates)
-	}
-}
-
-func TestValidateDN(t *testing.T) {
-	valid := []string{
-		"uid=admin,ou=people,dc=example,dc=com",
-		"cn=admin,dc=example,dc=com",
-		`cn=Doe\, John,ou=People,dc=example,dc=com`,
-		"dc=com",
-	}
-	for _, dn := range valid {
-		if err := ValidateDN(dn); err != nil {
-			t.Errorf("ValidateDN(%q) = %v, want nil", dn, err)
-		}
-	}
-
-	// The mistake people actually make: a bare username where a DN belongs.
-	err := ValidateDN("admin")
-	if err == nil {
-		t.Fatal("a bare username is not a DN")
-	}
-	if !strings.Contains(err.Error(), "uid=admin,ou=people") {
-		t.Errorf("the message should show what a DN looks like, got %q", err)
-	}
-
-	if err := ValidateDN("   "); err == nil {
-		t.Error("an empty bind DN should be rejected")
 	}
 }

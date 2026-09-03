@@ -74,7 +74,7 @@ Run `padl`, press `p` to open the server list, then `a` to add a server.
 | ID | Keys the keychain entry and the pinned certificate. It cannot be changed later. |
 | Security | `ldaps` (port 636), `starttls` (389), or `none` for plain LDAP. |
 | Bind | `simple` with a bind DN, or `anonymous`. Active Directory normally refuses anonymous. |
-| Bind DN | A full DN, not a username: `cn=admin,dc=example,dc=com`, or `uid=admin,ou=people,dc=example,dc=com` on lldap. |
+| Bind DN | Usually a full DN — `cn=admin,dc=example,dc=com`, or `uid=admin,ou=people,dc=example,dc=com` on lldap. Active Directory also takes `admin@example.com` or `EXAMPLE\admin`. It is sent as typed; the server decides. |
 | Password from | `keyring`, `prompt`, or `env`. |
 | Base DN | Leave empty to use the server's naming contexts. Set it when the server publishes none. |
 
@@ -185,10 +185,19 @@ server that has the entry. The bar always shows which attributes it will search.
 ```sh
 make test       # unit tests, no network
 make race       # under the race detector
-make lab        # throwaway OpenLDAP (13389 / 13636) and lldap (13390)
+make lab        # throwaway OpenLDAP (13389 / 13636), lldap (13390)
+                # and an Active Directory domain (13392 / 13638)
 make it         # integration tests against the lab
 make lab-down
 ```
+
+The AD container is a Samba domain controller — that is how you get a domain
+into a container — and it provisions the domain the first time it starts, which
+takes the best part of a minute; the other two are up in seconds. It refuses a
+simple bind on an unencrypted connection, the way a DC with LDAP signing
+required does, so reach it over LDAPS on 13638 or StartTLS on 13392. Its
+administrator password is `Padl-Lab-1` rather than the lab's usual one, because
+AD enforces complexity on it; the seeded users have `padl-lab`.
 
 Servers that cannot be run from a public image — eDirectory — have manual tests
 instead, gated behind environment variables and skipped by default. See

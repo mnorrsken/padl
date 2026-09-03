@@ -9,7 +9,6 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/mnorrsken/padl/internal/config"
-	"github.com/mnorrsken/padl/internal/ldapx"
 )
 
 // profileListActions are the callbacks the profile list needs from the app.
@@ -137,7 +136,7 @@ func profileForm(p config.Profile, isNew bool, onSave func(config.Profile), onCa
 	setHint := func(color tcell.Color, format string, args ...any) {
 		hint.SetText(fmt.Sprintf("[%s]%s[-]", tag(color), escape(fmt.Sprintf(format, args...))))
 	}
-	setHint(colorDim, "The bind DN is a full DN, e.g. uid=admin,ou=people,dc=example,dc=com.")
+	setHint(colorDim, "Bind as a DN (uid=admin,ou=people,dc=example,dc=com) or, on AD, admin@example.com or EXAMPLE\\admin.")
 
 	if isNew {
 		form.AddInputField("ID", edited.ID, 30, nil, func(t string) { edited.ID = strings.TrimSpace(t) })
@@ -217,14 +216,6 @@ func profileForm(p config.Profile, isNew bool, onSave func(config.Profile), onCa
 		if err := candidate.Validate(); err != nil {
 			setHint(colorError, "%v", err)
 			return
-		}
-		// Catch a bare username here rather than letting the server answer it
-		// with a result code that does not name the problem.
-		if candidate.Bind == config.BindSimple {
-			if err := ldapx.ValidateDN(candidate.BindDN); err != nil {
-				setHint(colorError, "%v", err)
-				return
-			}
 		}
 		onSave(candidate)
 	})

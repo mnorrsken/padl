@@ -8,8 +8,12 @@ darwin and windows. Used against OpenLDAP, lldap and Active Directory.
 
 - `make build` (to `bin/`), `make run`, `make test` (no network), `make race`,
   `make lint`, `make vet`, `make fmt`
-- `make lab` / `make lab-down` / `make lab-logs`: throwaway OpenLDAP + lldap
-  from `dev/docker-compose.yml`, seeded from `dev/seed.ldif`
+- `make lab` / `make lab-down` / `make lab-logs`: throwaway OpenLDAP + lldap +
+  an Active Directory domain from `dev/docker-compose.yml`. OpenLDAP is seeded
+  from `dev/seed.ldif`, the domain controller by `dev/samba-seed.sh`, and
+  `dev/samba-cert.py` issues it a certificate before samba starts the way a real
+  DC has one. Samba is the container; AD is what the tests are about, so keep
+  test names and comments about AD behaviour rather than Samba's
 - `make it`: integration tests against the lab (`PADL_IT=1 go test ./...`)
 - `make dist`: the same cross-compile the release does
 

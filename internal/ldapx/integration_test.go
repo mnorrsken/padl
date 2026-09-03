@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -472,18 +473,25 @@ func TestIntegrationLLDAPWrongDNShapeKeepsTheDiagnostic(t *testing.T) {
 	}
 }
 
-// A bare username never reaches the server: PADL says what a DN looks like.
-func TestIntegrationLLDAPBareUsernameIsCaughtLocally(t *testing.T) {
+// A bare username goes to the server like any other bind name, because only the
+// server knows which ones it takes — Active Directory accepts two that are not
+// DNs at all. lldap does not, and says so in terms worth passing on.
+func TestIntegrationLLDAPBareUsernameGetsTheServersAnswer(t *testing.T) {
 	requireIT(t)
 	p := itLLDAPProfile(t)
 	p.BindDN = "admin"
 
 	_, err := ldapx.Connect(ctx(t), p, nil, itAdminPwd)
 	if err == nil {
-		t.Fatal("a bare username is not a bind DN")
+		t.Fatal("lldap does not accept a bare username as a bind name")
 	}
-	if !strings.Contains(err.Error(), "is not a distinguished name") {
-		t.Errorf("the message should name the mistake, got %q", err)
+	if !strings.Contains(err.Error(), "admin") {
+		t.Errorf("the error should name the bind that failed, got %q", err)
+	}
+	// lldap answers this one with "Missing DN value", which is the only part
+	// that tells anyone what to type instead.
+	if !strings.Contains(strings.ToLower(err.Error()), "dn") {
+		t.Errorf("the server's own diagnostic should survive, got %q", err)
 	}
 }
 
@@ -640,4 +648,359 @@ func containsDN(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// --------------------------------------------------------- Active Directory
+
+// These test Active Directory, which PADL carries more special handling for
+// than any other server and could not be run against at all. The lab's domain
+// controller happens to be Samba, seeded by dev/samba-seed.sh, because that is
+// how a domain fits in a container — what is under test is AD's behaviour.
+//
+// The administrator's password is not the lab's usual one: AD enforces
+// complexity on it at provision time. Everything the seed creates afterwards
+// does use it.
+const (
+	itADBaseDN   = "DC=ad,DC=example,DC=com"
+	itADPeopleDN = "OU=People,DC=ad,DC=example,DC=com"
+	itADAdminDN  = "CN=Administrator,CN=Users,DC=ad,DC=example,DC=com"
+	itADAdminPwd = "Padl-Lab-1"
+	itADUserDN   = "CN=John Doe,OU=People,DC=ad,DC=example,DC=com"
+)
+
+func itADProfile(t *testing.T, security config.Security) config.Profile {
+	t.Helper()
+	p := config.NewProfile()
+	p.ID = "it-ad"
+	p.Name = "Active Directory lab"
+	p.Host = itHost()
+	p.Security = security
+	p.Bind = config.BindSimple
+	p.BindDN = itADAdminDN
+	p.PasswordRef = config.PasswordPrompt
+	p.BaseDN = itADBaseDN
+	p.TimeoutSeconds = 15
+	if security == config.SecurityLDAPS {
+		p.Port = itPort(t, "PADL_IT_AD_LDAPS_PORT", "13638")
+	} else {
+		p.Port = itPort(t, "PADL_IT_AD_LDAP_PORT", "13392")
+	}
+	return p
+}
+
+// connectAD does the trust-on-first-use dance the UI does, because the domain
+// controller's certificate is self-signed and every AD test needs a connection
+// before it can test anything else.
+func connectAD(t *testing.T, security config.Security) *ldapx.Client {
+	t.Helper()
+	p := itADProfile(t, security)
+
+	c, err := ldapx.Connect(ctx(t), p, nil, itADAdminPwd)
+	if err == nil {
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	cte, ok := ldapx.AsCertTrustError(err)
+	if !ok {
+		t.Fatalf("connect to the AD lab: %v", err)
+	}
+	pin := cte.Pin()
+	c, err = ldapx.Connect(ctx(t), p, &pin, itADAdminPwd)
+	if err != nil {
+		t.Fatalf("connect to the AD lab with the pin: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// A domain controller has to be recognised as one: the vendor decides which
+// naming contexts the tree offers and which attributes a quick search covers.
+func TestIntegrationADIsDetectedAndBrowsable(t *testing.T) {
+	requireIT(t)
+	c := connectAD(t, config.SecurityLDAPS)
+
+	if c.Vendor() != ldapx.VendorActiveDirectory {
+		t.Fatalf("vendor = %v, want Active Directory", c.Vendor())
+	}
+	if !c.SupportsPaging() {
+		t.Error("Active Directory advertises RFC 2696; PADL should have seen it")
+	}
+
+	root := c.Root()
+	if root.DefaultNamingContext == "" {
+		t.Error("AD publishes defaultNamingContext, which is what the tree opens on")
+	}
+	if !containsDN(root.Bases(itADBaseDN, false), itADBaseDN) {
+		t.Errorf("bases = %v, want the domain naming context", root.Bases(itADBaseDN, false))
+	}
+
+	// The domain root's children include the seeded containers. AD answers a
+	// one-level search here with referrals to the other naming contexts mixed
+	// in, which must not become tree rows or crash the loader.
+	page, err := c.Children(ctx(t), itADBaseDN, ldapx.PageRequest{Size: 100})
+	if err != nil {
+		t.Fatalf("children of %s: %v", itADBaseDN, err)
+	}
+	var dns []string
+	for _, e := range page.Entries {
+		dns = append(dns, e.DN)
+		if strings.TrimSpace(e.DN) == "" {
+			t.Error("a referral was turned into an entry with no DN")
+		}
+	}
+	for _, want := range []string{itADPeopleDN, "OU=Groups," + itADBaseDN} {
+		if !containsDN(dns, want) {
+			t.Errorf("children of the domain = %v, want %s among them", dns, want)
+		}
+	}
+}
+
+// A domain controller with LDAP signing required refuses a simple bind on an
+// unencrypted connection, which is how any hardened AD is configured and what
+// the lab DC does. PADL has to report that as the server's own diagnostic
+// rather than a generic failure — it is the difference between "use LDAPS" and
+// "something went wrong".
+func TestIntegrationADRefusesSimpleBindWithoutTLS(t *testing.T) {
+	requireIT(t)
+	_, err := ldapx.Connect(ctx(t), itADProfile(t, config.SecurityNone), nil, itADAdminPwd)
+	if err == nil {
+		t.Fatal("a cleartext simple bind should have been refused")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, itADAdminPwd) {
+		t.Errorf("the password leaked into the error: %q", msg)
+	}
+	// Result 8 is strongerAuthRequired. The server's text names the actual
+	// problem, so losing it would leave nothing worth reading.
+	if !strings.Contains(msg, "LDAP result 8") {
+		t.Errorf("error = %q, want the strongerAuthRequired result code", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "encryption") {
+		t.Errorf("error = %q, want the server's own diagnostic kept", msg)
+	}
+}
+
+// The two bind names people actually use on Active Directory, neither of which
+// is a DN. PADL used to refuse both before dialling on the grounds that a bind
+// name has to parse as a DN, which made the normal way in look like a typo.
+func TestIntegrationADAcceptsNonDNBindNames(t *testing.T) {
+	requireIT(t)
+
+	// One connect to get the certificate on file, so the bind is what is being
+	// tested rather than the trust prompt.
+	base := itADProfile(t, config.SecurityLDAPS)
+	_, err := ldapx.Connect(ctx(t), base, nil, itADAdminPwd)
+	cte, ok := ldapx.AsCertTrustError(err)
+	if !ok {
+		t.Fatalf("expected the trust prompt on a first connect, got %v", err)
+	}
+	pin := cte.Pin()
+
+	for _, name := range []string{
+		"administrator@ad.example.com", // userPrincipalName
+		`AD\Administrator`,             // NetBIOS domain and account
+		itADAdminDN,                    // and the DN still works
+	} {
+		p := base
+		p.BindDN = name
+		c, err := ldapx.Connect(ctx(t), p, &pin, itADAdminPwd)
+		if err != nil {
+			t.Errorf("bind as %q: %v", name, err)
+			continue
+		}
+		if _, err := c.Entry(ctx(t), itADUserDN, false); err != nil {
+			t.Errorf("bound as %q but could not read: %v", name, err)
+		}
+		_ = c.Close()
+	}
+
+	// A name the server does not know is still an error, just the server's one.
+	p := base
+	p.BindDN = "nobody@ad.example.com"
+	if _, err := ldapx.Connect(ctx(t), p, &pin, itADAdminPwd); err == nil {
+		t.Error("an unknown principal should not bind")
+	} else if strings.Contains(err.Error(), itADAdminPwd) {
+		t.Errorf("the password leaked into the error: %v", err)
+	}
+}
+
+// StartTLS gets the same trust decision LDAPS does, and is the other way into a
+// domain controller that will not take a cleartext bind.
+func TestIntegrationADStartTLS(t *testing.T) {
+	requireIT(t)
+	c := connectAD(t, config.SecurityStartTLS)
+
+	if c.Vendor() != ldapx.VendorActiveDirectory {
+		t.Errorf("vendor over StartTLS = %v, want Active Directory", c.Vendor())
+	}
+	if _, err := c.Children(ctx(t), itADPeopleDN, ldapx.PageRequest{Size: 10}); err != nil {
+		t.Fatalf("search over StartTLS: %v", err)
+	}
+}
+
+// The attributes PADL renders rather than prints. Every one of these is
+// AD-shaped and none of them could be checked against a live server before.
+func TestIntegrationADRendersItsOwnAttributes(t *testing.T) {
+	requireIT(t)
+	c := connectAD(t, config.SecurityLDAPS)
+
+	e, err := c.Entry(ctx(t), itADUserDN, false)
+	if err != nil {
+		t.Fatalf("read %s: %v", itADUserDN, err)
+	}
+
+	value := func(attr string) ldapx.Value {
+		t.Helper()
+		for _, a := range e.Attributes {
+			if strings.EqualFold(a.Name, attr) {
+				return ldapx.FormatAll(a)[0]
+			}
+		}
+		t.Fatalf("%s has no %s", e.DN, attr)
+		return ldapx.Value{}
+	}
+
+	// A SID off the wire is a packed little-endian structure; S-1-5-21-… is the
+	// only form anyone can compare against what a Windows tool shows.
+	if sid := value("objectSid"); !strings.HasPrefix(sid.Text, "S-1-5-21-") {
+		t.Errorf("objectSid = %q, want the S-1-5-21-… form", sid.Text)
+	} else if !sid.Binary {
+		t.Error("a rendered SID is still a binary value; the UI offers a hex dump for it")
+	}
+
+	// The first three fields of a GUID are little-endian on the wire. A plain
+	// hex dump with dashes in it would look right and be wrong.
+	guid := value("objectGUID")
+	if len(guid.Text) != 36 || strings.Count(guid.Text, "-") != 4 {
+		t.Errorf("objectGUID = %q, want a formatted UUID", guid.Text)
+	}
+	if len(guid.Raw) != 16 {
+		t.Errorf("objectGUID raw length = %d, want 16", len(guid.Raw))
+	}
+
+	// 512 is NORMAL_ACCOUNT. The number alone tells nobody anything.
+	if uac := value("userAccountControl"); !strings.Contains(uac.Text, "NORMAL_ACCOUNT") {
+		t.Errorf("userAccountControl = %q, want the flag named", uac.Text)
+	}
+
+	// pwdLastSet is a FILETIME: 100ns ticks since 1601, which is an eighteen
+	// digit number until something renders it.
+	pwd := value("pwdLastSet")
+	if strings.HasPrefix(pwd.Text, "1") && len(pwd.Text) > 15 {
+		t.Errorf("pwdLastSet = %q, want a rendered timestamp", pwd.Text)
+	}
+	if !strings.Contains(pwd.Text, "20") {
+		t.Errorf("pwdLastSet = %q, want a date in it", pwd.Text)
+	}
+
+	// whenCreated is generalizedTime, the other AD timestamp spelling.
+	if created := value("whenCreated"); strings.HasSuffix(created.Text, "Z") {
+		t.Errorf("whenCreated = %q, want it rendered rather than passed through", created.Text)
+	}
+
+	// The seed puts two addresses on proxyAddresses because AD's mail is
+	// single-valued, so the object pane has a multi-valued attribute to draw.
+	for _, a := range e.Attributes {
+		if strings.EqualFold(a.Name, "proxyAddresses") && len(a.Values) != 2 {
+			t.Errorf("proxyAddresses has %d values, want 2", len(a.Values))
+		}
+	}
+}
+
+// A quick search on AD leads with sAMAccountName, and matches it as typed
+// rather than by prefix. Both halves are worth proving against a real server:
+// the attribute list because AD is the least forgiving of a name it does not
+// know, and the exact match because it is the one that has to still find people.
+func TestIntegrationADQuickSearch(t *testing.T) {
+	requireIT(t)
+	c := connectAD(t, config.SecurityLDAPS)
+
+	find := func(words string) []string {
+		t.Helper()
+		filter := ldapx.QuickFilter(words, c.Vendor())
+		if filter == "" {
+			t.Fatalf("%q produced no filter", words)
+		}
+		page, err := c.Search(ctx(t), ldapx.Query{
+			BaseDN: itADBaseDN, Scope: ldapx.ScopeSubtree, Filter: filter,
+		}, ldapx.PageRequest{Size: 50})
+		if err != nil {
+			t.Fatalf("%q (%s): %v", words, filter, err)
+		}
+		var dns []string
+		for _, e := range page.Entries {
+			dns = append(dns, e.DN)
+		}
+		return dns
+	}
+
+	// The login name, matched exactly, is the search people actually type.
+	if dns := find("jdoe"); !containsDN(dns, itADUserDN) {
+		t.Errorf("quick search for jdoe = %v, want John Doe", dns)
+	}
+	// A prefix of the display name still works, through cn and displayName.
+	if dns := find("john"); !containsDN(dns, itADUserDN) {
+		t.Errorf("quick search for john = %v, want John Doe", dns)
+	}
+	// Two words narrow rather than widen.
+	if dns := find("john doe"); !containsDN(dns, itADUserDN) {
+		t.Errorf("quick search for john doe = %v, want John Doe", dns)
+	}
+	// The whole AD attribute list has to be something the server will accept.
+	// RFC 4511 says an unknown attribute makes the filter Undefined, and AD is
+	// the server most likely to hold PADL to it.
+	if dns := find("alice"); !containsDN(dns, "CN=Alice Smith,"+itADPeopleDN) {
+		t.Errorf("quick search for alice = %v, want Alice Smith", dns)
+	}
+
+	// A lone short word is matched as typed, so it finds nothing rather than
+	// dragging the whole domain back one page at a time.
+	if filter := ldapx.QuickFilter("a", c.Vendor()); strings.Contains(filter, "*") {
+		t.Errorf("a single short word should not be wildcarded: %s", filter)
+	}
+}
+
+// AD is the server the paging code exists for. A page size of one walks the
+// seeded people one at a time, which is the loop the tree runs when a container
+// has more children than the page size.
+func TestIntegrationADPagedChildren(t *testing.T) {
+	requireIT(t)
+	c := connectAD(t, config.SecurityLDAPS)
+
+	seen := map[string]bool{}
+	req := ldapx.PageRequest{Size: 1}
+	for pages := 0; ; pages++ {
+		if pages > 20 {
+			t.Fatal("paging did not terminate")
+		}
+		page, err := c.Children(ctx(t), itADPeopleDN, req)
+		if err != nil {
+			t.Fatalf("children page %d: %v", pages, err)
+		}
+		for _, e := range page.Entries {
+			if seen[strings.ToLower(e.DN)] {
+				t.Errorf("%s came back on more than one page", e.DN)
+			}
+			seen[strings.ToLower(e.DN)] = true
+		}
+		if !page.More() {
+			break
+		}
+		req = page.Next(1)
+	}
+
+	for _, want := range []string{itADUserDN, "CN=Alice Smith," + itADPeopleDN} {
+		if !seen[strings.ToLower(want)] {
+			t.Errorf("paging missed %s; saw %v", want, keysOf(seen))
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

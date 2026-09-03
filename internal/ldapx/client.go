@@ -115,34 +115,14 @@ func bind(conn *ldap.Conn, p config.Profile, password string) error {
 		}
 		return nil
 	}
-	// Catch a bind name that is not a DN before it reaches the server. Servers
-	// answer this with anything from invalidDNSyntax to namingViolation, and
-	// none of those codes say the useful thing.
-	if err := ValidateDN(p.BindDN); err != nil {
-		return fmt.Errorf("bind as %s failed: %w", p.BindDN, err)
-	}
+	// The bind name goes to the server as typed. It is not always a DN: Active
+	// Directory takes a UPN (jdoe@ad.example.com) and the NetBIOS form
+	// (AD\jdoe) just as happily, and both are verified against the lab domain
+	// controller. PADL used to insist on a parseable DN here and refused those
+	// before dialling, which made the two ways most people log in to AD look
+	// like typos. Only the server knows which names it accepts.
 	if err := conn.Bind(p.BindDN, password); err != nil {
 		return fmt.Errorf("bind as %s failed: %w", p.BindDN, redactBindError(err, password))
-	}
-	return nil
-}
-
-// ValidateDN reports whether s is a syntactically valid distinguished name.
-//
-// The message names the mistake people actually make — typing a bare username
-// where a DN belongs — because the LDAP result codes for it are unhelpful and
-// vary by server.
-func ValidateDN(s string) error {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return errors.New("the bind DN is empty")
-	}
-	if _, err := ldap.ParseDN(trimmed); err != nil {
-		if !strings.Contains(trimmed, "=") {
-			return fmt.Errorf("%q is not a distinguished name — a bind DN looks like "+
-				"uid=admin,ou=people,dc=example,dc=com or cn=admin,dc=example,dc=com", trimmed)
-		}
-		return fmt.Errorf("%q is not a valid distinguished name: %w", trimmed, err)
 	}
 	return nil
 }

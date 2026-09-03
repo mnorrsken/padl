@@ -56,3 +56,73 @@ services:
       interval: 3s
       timeout: 5s
       retries: 20
+
+  # An Active Directory domain to test against, seeded by dev/samba-seed.sh.
+  #
+  # AD is the server PADL carries the most special handling for — objectGUID and
+  # objectSid rendering, FILETIME timestamps, userAccountControl flags, a
+  # quick-search list led by sAMAccountName, RFC 2696 paging — and none of it was
+  # covered by anything runnable. Samba is how you get a domain controller into a
+  # container; the subject under test is AD, not Samba.
+  #
+  # Two things differ from the other two containers and are the point rather than
+  # an accident:
+  #
+  #   - It refuses a simple bind on an unencrypted connection, the way a domain
+  #     controller with LDAP signing required does, so the tests reach it over
+  #     LDAPS or StartTLS. The plain-LDAP refusal is itself worth pinning.
+  #   - It serves a certificate the lab issues it (dev/samba-cert.py), because a
+  #     domain controller has one installed rather than improvised at startup.
+  #     It is self-signed and issued for the container's hostname, so connecting
+  #     to 127.0.0.1 still goes through the same trust-on-first-use path the
+  #     OpenLDAP lab exercises.
+  #
+  # SYS_ADMIN is not optional. Provisioning writes the sysvol NT ACLs through
+  # smbd, and without the capability it dies partway with NT_STATUS_ACCESS_DENIED
+  # and no usable domain.
+  #
+  # Provisioning takes the best part of a minute, which is why start_period is
+  # what it is. The other two are up in seconds.
+  samba-ad:
+    image: instantlinux/samba-dc:4.23.10-r0
+    container_name: padl-lab-ad
+    hostname: padldc
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      REALM: "ad.example.com"
+      WORKGROUP: "AD"
+      NETBIOS_NAME: "PADLDC"
+      DOMAIN_ACTION: "provision"
+    # The image execs samba in the foreground, so seeding needs a wrapper around
+    # its entrypoint rather than a command of its own.
+    entrypoint: ["/bin/sh", "/seed/samba-entrypoint.sh"]
+    secrets:
+      - samba-admin-password
+    volumes:
+      - ./samba-entrypoint.sh:/seed/samba-entrypoint.sh:ro
+      - ./samba-seed.sh:/seed/samba-seed.sh:ro
+      - ./samba-cert.py:/seed/samba-cert.py:ro
+    ports:
+      # 13391 and 13637 are left free for the eDirectory container people start
+      # by hand; see docs/manual-tests.md.
+      - "13392:389"
+      - "13638:636"
+    healthcheck:
+      # Both halves matter: the first says samba is answering on LDAP, the
+      # second that the seed finished. A directory that is up but empty would
+      # fail the tests in a way that looks like a PADL bug.
+      test: ["CMD-SHELL",
+             "ldbsearch -H ldap://localhost --scope=base -b '' defaultNamingContext >/dev/null 2>&1 && test -f /var/lib/samba/.padl-seeded"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
+# The image reads the domain administrator's password from a secret rather than
+# an environment variable. AD enforces complexity on it, so it cannot be the
+# "padl-lab" the rest of the lab uses — everything the seed creates afterwards
+# can be, because the seed turns complexity off first.
+secrets:
+  samba-admin-password:
+    file: ./samba-admin-password
