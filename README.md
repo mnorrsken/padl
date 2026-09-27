@@ -71,6 +71,7 @@ Or from a checkout:
 
 ```sh
 make build      # ./bin/padl
+make install    # builds for this machine, puts it in /usr/local/bin with sudo
 ```
 
 ## Getting started

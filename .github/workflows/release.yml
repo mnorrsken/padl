@@ -215,13 +215,14 @@ jobs:
           On Windows, run the \`.msi\`: it installs to \`%LocalAppData%\\Programs\\PADL\`,
           adds itself to your PATH, and needs no administrator rights.
 
-          On linux or macOS, download the matching binary below, then:
+          On linux or macOS, download the matching binary below and put it where
+          \`make install\` would:
 
           \`\`\`sh
-          chmod +x padl_${VERSION_NO_V}_\$(uname -s | tr 'A-Z' 'a-z')_\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          sudo install -m 0755 padl_${VERSION_NO_V}_\$(uname -s | tr 'A-Z' 'a-z')_\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') /usr/local/bin/padl
           \`\`\`
 
-          Verify with \`sha256sum -c checksums.txt\` — checksums attached below.
+          Verify with \`sha256sum -c checksums.txt --ignore-missing\` — checksums attached below.
           NOTES
           } > notes.md
 

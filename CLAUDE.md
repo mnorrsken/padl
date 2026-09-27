@@ -8,6 +8,8 @@ darwin and windows. Used against OpenLDAP, lldap and Active Directory.
 
 - `make build` (to `bin/`), `make run`, `make test` (no network), `make race`,
   `make lint`, `make vet`, `make fmt`
+- `make install`: build for this machine and put it in `/usr/local/bin` with
+  sudo, where the release notes tell people to put a downloaded binary
 - `make lab` / `make lab-down` / `make lab-logs`: throwaway OpenLDAP + lldap +
   an Active Directory domain from `dev/docker-compose.yml`. OpenLDAP is seeded
   from `dev/seed.ldif`, the domain controller by `dev/samba-seed.sh`, and

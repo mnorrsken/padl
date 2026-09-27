@@ -3,10 +3,11 @@ PKG     := github.com/mnorrsken/padl
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w -X $(PKG)/internal/version.Version=$(VERSION) -X $(PKG)/internal/version.Commit=$(COMMIT)
+BINDIR  := /usr/local/bin
 
 COMPOSE := docker compose -f dev/docker-compose.yml
 
-.PHONY: help build run test race it lint fmt vet tidy clean lab lab-down lab-logs \
+.PHONY: help build run install test race it lint fmt vet tidy clean lab lab-down lab-logs \
 	lab-edir lab-profiles lab-profiles-rm dist
 
 help: ## Show this help
@@ -17,6 +18,10 @@ build: ## Build ./bin/padl
 
 run: build ## Build and run
 	./bin/$(BINARY)
+
+install: build ## Build for this machine and install into /usr/local/bin (sudo)
+	sudo install -m 0755 bin/$(BINARY) $(BINDIR)/$(BINARY)
+	@$(BINDIR)/$(BINARY) -version || true
 
 test: ## Unit tests (no network, no containers)
 	go test ./...
