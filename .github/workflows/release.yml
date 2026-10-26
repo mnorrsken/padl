@@ -40,6 +40,10 @@ jobs:
         if: runner.os == 'Windows'
         run: go test ./...
 
+      - name: govulncheck
+        if: runner.os == 'Linux'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
       # The lab directories are Linux containers, so the integration tests only
       # run there.
       - name: Start the lab directories

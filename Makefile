@@ -8,7 +8,7 @@ BINDIR  := /usr/local/bin
 COMPOSE := docker compose -f dev/docker-compose.yml
 
 .PHONY: help build run install test race it lint fmt vet tidy clean lab lab-down lab-logs \
-	lab-edir lab-profiles lab-profiles-rm dist
+	lab-edir lab-profiles lab-profiles-rm dist vuln
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -45,6 +45,9 @@ fmt: ## Format
 tidy: ## Tidy go.mod
 	go mod tidy
 
+vuln: ## Check dependencies and stdlib for known vulnerabilities
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
 lab: ## Start the throwaway directories (OpenLDAP + lldap + Samba AD) and wait for them
 	$(COMPOSE) up -d
 	@echo "waiting for the lab directories..."
@@ -79,7 +82,7 @@ lab-down: ## Stop and delete the lab directories
 lab-logs: ## Follow the lab directories' logs
 	$(COMPOSE) logs -f
 
-dist: ## Cross-compile release binaries into ./dist
+dist: vuln ## Cross-compile release binaries into ./dist
 	@mkdir -p dist
 	@for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64 windows/arm64; do \
 		os=$${target%/*}; arch=$${target#*/}; ext=""; \
