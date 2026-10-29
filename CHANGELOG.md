@@ -2,6 +2,19 @@
 
 All notable changes to PADL.
 
+## [0.8.1] - 2026-10-29
+
+### Changed
+- `go-ldap/ldap` updated from 3.4.14 to 3.4.15.
+- The release notes now tell macOS and Linux users to install the downloaded
+  binary with `sudo install` into `/usr/local/bin`, and to check it with
+  `sha256sum -c checksums.txt --ignore-missing`.
+- The release workflow and `make dist` run `govulncheck` first.
+
+### Added
+- `make install` builds PADL for this machine and puts it in `/usr/local/bin`.
+- `make vuln` runs `govulncheck`.
+
 ## [0.8.0] - 2026-09-03
 
 ### Added
