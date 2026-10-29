@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	github.com/gdamore/tcell/v2 v2.13.10
-	github.com/go-ldap/ldap/v3 v3.4.14
+	github.com/go-ldap/ldap/v3 v3.4.15
 	github.com/rivo/tview v0.42.0
 	github.com/zalando/go-keyring v0.2.8
 	gopkg.in/yaml.v3 v3.0.1
