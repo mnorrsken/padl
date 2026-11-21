@@ -2,6 +2,16 @@
 
 All notable changes to PADL.
 
+## [0.8.2] - 2026-11-21
+
+### Changed
+- Indirect dependencies updated: `golang.org/x/crypto` 0.54.0 to 0.59.0,
+  `golang.org/x/sys` 0.47.0 to 0.50.0, `golang.org/x/term` 0.45.0 to 0.48.0,
+  `golang.org/x/text` 0.40.0 to 0.44.0, `godbus/dbus/v5` 5.2.2 to 5.2.4 and
+  `lucasb-eyer/go-colorful` 1.3.0 to 1.4.1.
+- `govulncheck` and a Trivy scan of the source and the release binaries found
+  no known vulnerabilities.
+
 ## [0.8.1] - 2026-10-29
 
 ### Changed
